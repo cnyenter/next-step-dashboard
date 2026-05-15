@@ -9,7 +9,7 @@ import re
 st.set_page_config(page_title="Next Step Trading", layout="wide")
 st.markdown("<style>.block-container { padding-top: 1rem; padding-bottom: 1rem; }</style>", unsafe_allow_html=True)
 
-# 2. Sidebar Controls (Clean - No Text Box)
+# 2. Sidebar Controls
 st.sidebar.title("🎛️ Dashboard Controls")
 selected_asset = st.sidebar.radio("Select Active Asset:", ["E-mini Futures (ES_F)", "S&P 500 Index (SPX)"])
 
@@ -73,17 +73,19 @@ try:
     levels_df = pd.read_csv(SHEET_URL)
     filtered_levels = levels_df[levels_df['Ticker'] == active_ticker]
 except Exception as e:
-    st.error("Could not read the primary S/R Google Sheet.")
+    st.error("Could not read the primary S/R Google Sheet. Check the link.")
     st.stop()
 
-# Load MenthorQ Raw Text from Cell A1
+# Load MenthorQ Raw Text
 mq_paste = ""
 try:
-    mq_df = pd.read_csv(MQ_SHEET_URL, header=None) # Tells Pandas not to look for column headers
+    mq_df = pd.read_csv(MQ_SHEET_URL, header=None)
     if not mq_df.empty:
-        mq_paste = str(mq_df.iloc[0, 0]) # Grabs the raw text block from Cell A1
+        # THE FIX: This command merges every row and column of the sheet into one giant text block
+        # so our code can find the numbers no matter where Google Sheets put them.
+        mq_paste = mq_df.to_string(header=False, index=False) 
 except Exception as e:
-    pass # If the sheet is empty or failing, it just skips drawing the MenthorQ lines without breaking the app
+    pass 
 
 # 7. Chart Construction
 fig = go.Figure(data=[go.Candlestick(x=df_main.index, open=df_main['Open'], high=df_main['High'], low=df_main['Low'], close=df_main['Close'], name=asset_label)])
@@ -94,14 +96,16 @@ for index, row in filtered_levels.iterrows():
     fill_color, border_color = ("#00FF00", "#00CC00") if zone_type == "Support" else ("#FF0000", "#CC0000")
     fig.add_hrect(y0=bottom, y1=top, line_width=1, line_color=border_color, fillcolor=fill_color, opacity=0.35, annotation_text=zone_type, annotation_position="top left", annotation_font=dict(color="white", size=12))
 
-# Parse and Draw MenthorQ Lines invisibly
+# Parse and Draw MenthorQ Lines
 if mq_paste:
     for line in mq_paste.split('\n'):
         if not line.strip(): continue
+        # Find all numbers in the line
         numbers = re.findall(r'[\d,]+\.?\d*', line)
         if numbers:
             val = float(numbers[-1].replace(',', ''))
             
+            # Map lines to the chart
             if "0DTE Call" in line:
                 fig.add_hline(y=val, line_dash="dot", line_color="#FF00FF", line_width=2, annotation_text="0DTE Call Wall", annotation_position="right", annotation_font=dict(color="#FF00FF"))
             elif "0DTE Put" in line:
