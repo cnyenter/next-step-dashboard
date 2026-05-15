@@ -69,69 +69,67 @@ try:
 except:
     filtered_levels = pd.DataFrame()
 
-# Load and Parse MenthorQ Raw Text
-mq_paste = ""
-mq_table_data = [] # List to hold data for our clean table
+# Load and Parse MenthorQ Raw Text securely into a Dictionary
+mq_dict = {}
 try:
     mq_df = pd.read_csv(MQ_SHEET_URL, header=None)
     if not mq_df.empty:
         mq_paste = mq_df.to_string(header=False, index=False) 
-        
-        # Extract data for the visual table
         for line in mq_paste.split('\n'):
             if not line.strip(): continue
             numbers = re.findall(r'[\d,]+\.?\d*', line)
             if numbers:
                 val = float(numbers[-1].replace(',', ''))
-                name = re.sub(r'[\d,]+\.?\d*', '', line).strip() # Removes the number to get just the name
-                mq_table_data.append({"Level Type": name, "Value": val})
+                name = re.sub(r'[\d,]+\.?\d*', '', line).strip()
+                mq_dict[name] = val
 except:
     pass 
 
-# 6. Display Clean MenthorQ Table UI
-if mq_table_data:
-    st.markdown("### 🧠 Institutional Dealer Walls (MenthorQ)")
+# 6. Build the Visual "Dealer Proximity Radar" (Replaces the boring table)
+# We safely look for the keywords in your paste. If they exist, we build the gauge.
+call_res = next((val for key, val in mq_dict.items() if "Call Resistance" in key), None)
+put_sup = next((val for key, val in mq_dict.items() if "Put Support" in key), None)
+hvl = next((val for key, val in mq_dict.items() if "HVL" in key or "High Vol Level" in key), None)
+
+if call_res and put_sup:
+    st.markdown("### 🎯 Dealer Proximity Radar")
     
-    # Converts our extracted data into a beautiful Streamlit dataframe
-    df_mq_display = pd.DataFrame(mq_table_data)
+    fig_gauge = go.Figure(go.Indicator(
+        mode = "number+gauge",
+        value = latest_price,
+        domain = {'x': [0.1, 1], 'y': [0, 1]},
+        title = {'text': "<b>Live Price</b>", 'font': {"color": "white", "size": 16}},
+        number = {'font': {"color": "white"}},
+        gauge = {
+            'shape': "bullet",
+            'axis': {'range': [put_sup - 20, call_res + 20], 'tickfont': {"color": "white"}},
+            'bar': {'color': "white", 'thickness': 0.1},
+            'steps': [
+                {'range': [put_sup - 20, put_sup], 'color': "rgba(0, 255, 255, 0.3)"}, # Put Support Zone (Cyan)
+                {'range': [put_sup, call_res], 'color': "rgba(128, 128, 128, 0.2)"},   # Safe Middle Zone
+                {'range': [call_res, call_res + 20], 'color': "rgba(255, 0, 255, 0.3)"} # Call Res Zone (Magenta)
+            ],
+            'threshold': {
+                'line': {'color': "yellow", 'width': 3},
+                'thickness': 0.75,
+                'value': hvl if hvl else (call_res + put_sup)/2
+            }
+        }
+    ))
+    fig_gauge.update_layout(height=150, margin=dict(t=20, b=20, l=100, r=20), template="plotly_dark", paper_bgcolor='#111111', plot_bgcolor='#111111')
+    st.plotly_chart(fig_gauge, theme=None, use_container_width=True)
     
-    # Uses columns to make the table take up half the screen nicely instead of stretching too far
-    tbl_col1, tbl_col2 = st.columns([1, 1])
-    with tbl_col1:
-        st.dataframe(df_mq_display, use_container_width=True, hide_index=True)
-        
+    st.markdown("<p style='text-align: center; color: gray; font-size: 14px;'><i>Yellow Line = High Vol Level (HVL). Cyan/Magenta blocks = Institutional Walls.</i></p>", unsafe_allow_html=True)
     st.divider()
 
-# 7. Chart Construction
+# 7. Chart Construction (Main Price Chart)
 fig = go.Figure(data=[go.Candlestick(x=df_main.index, open=df_main['Open'], high=df_main['High'], low=df_main['Low'], close=df_main['Close'], name=asset_label)])
 
-# Draw Primary S/R Zones
+# Draw Primary S/R Zones Only (MenthorQ lines removed to clear chart clutter)
 for index, row in filtered_levels.iterrows():
     zone_type, bottom, top = row['Type'], row['Bottom'], row['Top']
     fill_color, border_color = ("#00FF00", "#00CC00") if zone_type == "Support" else ("#FF0000", "#CC0000")
     fig.add_hrect(y0=bottom, y1=top, line_width=1, line_color=border_color, fillcolor=fill_color, opacity=0.35, annotation_text=zone_type, annotation_position="top left", annotation_font=dict(color="white", size=12))
-
-# Parse and Draw MenthorQ Lines (with improved visibility backgrounds)
-if mq_paste:
-    for line in mq_paste.split('\n'):
-        if not line.strip(): continue
-        numbers = re.findall(r'[\d,]+\.?\d*', line)
-        if numbers:
-            val = float(numbers[-1].replace(',', ''))
-            
-            # Common annotation formatting to give the text a solid black background
-            bg_format = dict(color="white", size=11)
-            
-            if "0DTE Call" in line:
-                fig.add_hline(y=val, line_dash="dot", line_color="#FF00FF", line_width=2, annotation_text="0DTE Call", annotation_position="right", annotation_font=bg_format, annotation_bgcolor="#FF00FF")
-            elif "0DTE Put" in line:
-                fig.add_hline(y=val, line_dash="dot", line_color="#00FFFF", line_width=2, annotation_text="0DTE Put", annotation_position="right", annotation_font=dict(color="black", size=11), annotation_bgcolor="#00FFFF")
-            elif "Call Resistance" in line:
-                fig.add_hline(y=val, line_dash="solid", line_color="#FF00FF", line_width=2, annotation_text="Call Resistance", annotation_position="right", annotation_font=bg_format, annotation_bgcolor="#FF00FF")
-            elif "Put Support" in line:
-                fig.add_hline(y=val, line_dash="solid", line_color="#00FFFF", line_width=2, annotation_text="Put Support", annotation_position="right", annotation_font=dict(color="black", size=11), annotation_bgcolor="#00FFFF")
-            elif "High Vol Level" in line or "HVL" in line:
-                fig.add_hline(y=val, line_dash="solid", line_color="#FFD700", line_width=3, annotation_text="HVL", annotation_position="bottom right", annotation_font=dict(color="black", size=12), annotation_bgcolor="#FFD700")
 
 # Draw Expected Moves
 fig.add_hline(y=em_upper, line_dash="dash", line_color="#00BFFF", line_width=1.5, annotation_text="+1 SD", annotation_position="bottom left", annotation_font=dict(color="white"), annotation_bgcolor="#00BFFF")
