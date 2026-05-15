@@ -85,15 +85,34 @@ try:
 except:
     pass 
 
-# 6. Build the Visual "Dealer Proximity Radar" (Replaces the boring table)
-# We safely look for the keywords in your paste. If they exist, we build the gauge.
+# 6. Build the Visual "Dealer Proximity Radar"
 call_res = next((val for key, val in mq_dict.items() if "Call Resistance" in key), None)
 put_sup = next((val for key, val in mq_dict.items() if "Put Support" in key), None)
 hvl = next((val for key, val in mq_dict.items() if "HVL" in key or "High Vol Level" in key), None)
+dte_call = next((val for key, val in mq_dict.items() if "0DTE Call" in key), None)
+dte_put = next((val for key, val in mq_dict.items() if "0DTE Put" in key), None)
 
 if call_res and put_sup:
     st.markdown("### 🎯 Dealer Proximity Radar")
     
+    # Calculate dynamic boundaries to ensure 0DTE levels always fit on the screen
+    all_gauge_vals = [val for val in [put_sup, call_res, hvl, dte_call, dte_put, latest_price] if val is not None]
+    min_range = min(all_gauge_vals) - 15
+    max_range = max(all_gauge_vals) + 15
+
+    # Define base background zones
+    gauge_steps = [
+        {'range': [min_range, put_sup], 'color': "rgba(0, 255, 255, 0.15)"},
+        {'range': [put_sup, call_res], 'color': "rgba(128, 128, 128, 0.1)"}, 
+        {'range': [call_res, max_range], 'color': "rgba(255, 0, 255, 0.15)"} 
+    ]
+    
+    # Overlay 0DTE as bright, solid 2-point bands for maximum visibility
+    if dte_put:
+        gauge_steps.append({'range': [dte_put - 1, dte_put + 1], 'color': "#00FFFF"})
+    if dte_call:
+        gauge_steps.append({'range': [dte_call - 1, dte_call + 1], 'color': "#FF00FF"})
+
     fig_gauge = go.Figure(go.Indicator(
         mode = "number+gauge",
         value = latest_price,
@@ -102,13 +121,9 @@ if call_res and put_sup:
         number = {'font': {"color": "white"}},
         gauge = {
             'shape': "bullet",
-            'axis': {'range': [put_sup - 20, call_res + 20], 'tickfont': {"color": "white"}},
+            'axis': {'range': [min_range, max_range], 'tickfont': {"color": "white"}},
             'bar': {'color': "white", 'thickness': 0.1},
-            'steps': [
-                {'range': [put_sup - 20, put_sup], 'color': "rgba(0, 255, 255, 0.3)"}, # Put Support Zone (Cyan)
-                {'range': [put_sup, call_res], 'color': "rgba(128, 128, 128, 0.2)"},   # Safe Middle Zone
-                {'range': [call_res, call_res + 20], 'color': "rgba(255, 0, 255, 0.3)"} # Call Res Zone (Magenta)
-            ],
+            'steps': gauge_steps,
             'threshold': {
                 'line': {'color': "yellow", 'width': 3},
                 'thickness': 0.75,
@@ -119,13 +134,13 @@ if call_res and put_sup:
     fig_gauge.update_layout(height=150, margin=dict(t=20, b=20, l=100, r=20), template="plotly_dark", paper_bgcolor='#111111', plot_bgcolor='#111111')
     st.plotly_chart(fig_gauge, theme=None, use_container_width=True)
     
-    st.markdown("<p style='text-align: center; color: gray; font-size: 14px;'><i>Yellow Line = High Vol Level (HVL). Cyan/Magenta blocks = Institutional Walls.</i></p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: gray; font-size: 14px;'><i>Yellow Line = High Vol Level (HVL). Translucent blocks = Core Walls. Solid bright lines = 0DTE Walls.</i></p>", unsafe_allow_html=True)
     st.divider()
 
 # 7. Chart Construction (Main Price Chart)
 fig = go.Figure(data=[go.Candlestick(x=df_main.index, open=df_main['Open'], high=df_main['High'], low=df_main['Low'], close=df_main['Close'], name=asset_label)])
 
-# Draw Primary S/R Zones Only (MenthorQ lines removed to clear chart clutter)
+# Draw Primary S/R Zones Only
 for index, row in filtered_levels.iterrows():
     zone_type, bottom, top = row['Type'], row['Bottom'], row['Top']
     fill_color, border_color = ("#00FF00", "#00CC00") if zone_type == "Support" else ("#FF0000", "#CC0000")
