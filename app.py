@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import math
 import re
 
@@ -28,16 +27,17 @@ else: api_interval, api_period = "1d", "3mo"
 
 st.title(f"Next Step Trading: Daily Live Cockpit ({asset_label})")
 
-# 3. Fetch Market Data (Now including Internals)
+# 3. Fetch Market Data (Fixed Internals to Daily Macro Trend)
 @st.cache_data(ttl=300)
 def get_market_data(ticker, period, interval):
     main_asset = yf.Ticker(ticker).history(period=period, interval=interval)
     nq = yf.Ticker("NQ=F").history(period="2d", interval="15m")
     btc = yf.Ticker("BTC-USD").history(period="2d", interval="15m")
     vix = yf.Ticker("^VIX").history(period="1d")
-    # Fetching Market Internals
-    ad_line = yf.Ticker("^ADD").history(period=period, interval=interval)
-    trin = yf.Ticker("^TRIN").history(period=period, interval=interval)
+    
+    # THE FIX: Force these two to Daily data ("1d") so Yahoo Finance actually returns them
+    ad_line = yf.Ticker("^ADD").history(period="3mo", interval="1d")
+    trin = yf.Ticker("^TRIN").history(period="3mo", interval="1d")
     
     return main_asset, nq, btc, vix, ad_line, trin
 
@@ -67,14 +67,12 @@ st.divider()
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?output=csv"
 MQ_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=1464368299&single=true&output=csv"
 
-# Load Primary S/R Levels
 try:
     levels_df = pd.read_csv(SHEET_URL)
     filtered_levels = levels_df[levels_df['Ticker'] == active_ticker]
 except:
     filtered_levels = pd.DataFrame()
 
-# Load and Parse MenthorQ
 mq_dict = {}
 try:
     mq_df = pd.read_csv(MQ_SHEET_URL, header=None)
@@ -146,16 +144,16 @@ fig.add_hline(y=em_lower, line_dash="dash", line_color="#00BFFF", line_width=1.5
 fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=600, yaxis=dict(side="right"), paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=30, b=10))
 st.plotly_chart(fig, theme=None, use_container_width=True)
 
-# --- NEW: Market Internals Section ---
-st.markdown("### 🩻 Market Internals (Momentum Engine)")
+# 8. Market Internals Section
+st.markdown("### 🩻 Market Internals (3-Month Macro Breadth)")
 int_col1, int_col2 = st.columns(2)
 
 def build_internal_chart(df, title, line_color, baseline=None):
     fig_int = go.Figure()
     if not df.empty:
+        # Changed mode to lines to show a continuous trend
         fig_int.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', line=dict(color=line_color, width=2)))
         if baseline is not None:
-            # Adds a distinct zero-line or baseline for internal indicators
             fig_int.add_hline(y=baseline, line_dash="dash", line_color="white", line_width=1, opacity=0.5)
             
     fig_int.update_layout(title=dict(text=title, font=dict(size=14, color="white")), xaxis_rangeslider_visible=False, template="plotly_dark", height=250, paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=40, b=10), yaxis=dict(side="right"))
@@ -166,7 +164,7 @@ with int_col2: st.plotly_chart(build_internal_chart(df_trin, "Arms Index (^TRIN)
 
 st.divider()
 
-# 8. Macro Engines
+# 9. Macro Engines
 st.markdown("### 🌐 Macro Liquidity & Risk Engine")
 macro_col1, macro_col2 = st.columns(2)
 
