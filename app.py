@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import math
 import re
 
@@ -27,16 +28,20 @@ else: api_interval, api_period = "1d", "3mo"
 
 st.title(f"Next Step Trading: Daily Live Cockpit ({asset_label})")
 
-# 3. Fetch Market Data
+# 3. Fetch Market Data (Now including Internals)
 @st.cache_data(ttl=300)
 def get_market_data(ticker, period, interval):
     main_asset = yf.Ticker(ticker).history(period=period, interval=interval)
     nq = yf.Ticker("NQ=F").history(period="2d", interval="15m")
     btc = yf.Ticker("BTC-USD").history(period="2d", interval="15m")
     vix = yf.Ticker("^VIX").history(period="1d")
-    return main_asset, nq, btc, vix
+    # Fetching Market Internals
+    ad_line = yf.Ticker("^ADD").history(period=period, interval=interval)
+    trin = yf.Ticker("^TRIN").history(period=period, interval=interval)
+    
+    return main_asset, nq, btc, vix, ad_line, trin
 
-df_main, df_nq, df_btc, df_vix = get_market_data(active_ticker, api_period, api_interval)
+df_main, df_nq, df_btc, df_vix, df_ad, df_trin = get_market_data(active_ticker, api_period, api_interval)
 
 if df_main.empty:
     st.error("⚠️ Data temporarily unavailable.")
@@ -69,7 +74,7 @@ try:
 except:
     filtered_levels = pd.DataFrame()
 
-# Load and Parse MenthorQ Raw Text securely into a Dictionary
+# Load and Parse MenthorQ
 mq_dict = {}
 try:
     mq_df = pd.read_csv(MQ_SHEET_URL, header=None)
@@ -81,13 +86,12 @@ try:
             if numbers:
                 val_str = numbers[-1]
                 val = float(val_str.replace(',', ''))
-                # THE FIX: Split by the specific value string to preserve the "0" in 0DTE
                 name = line.rsplit(val_str, 1)[0].strip() 
                 mq_dict[name] = val
 except:
     pass 
 
-# 6. Build the Visual "Dealer Proximity Radar"
+# 6. Dealer Proximity Radar
 call_res = next((val for key, val in mq_dict.items() if "Call Resistance" in key and "0DTE" not in key), None)
 put_sup = next((val for key, val in mq_dict.items() if "Put Support" in key and "0DTE" not in key), None)
 hvl = next((val for key, val in mq_dict.items() if "HVL" in key or "High Vol Level" in key), None)
@@ -107,11 +111,8 @@ if call_res and put_sup:
         {'range': [call_res, max_range], 'color': "rgba(255, 0, 255, 0.15)"} 
     ]
     
-    # Overlay 0DTE as bright, solid 10-point bands for maximum visibility
-    if dte_put:
-        gauge_steps.append({'range': [dte_put - 5, dte_put + 5], 'color': "#00FFFF"})
-    if dte_call:
-        gauge_steps.append({'range': [dte_call - 5, dte_call + 5], 'color': "#FF00FF"})
+    if dte_put: gauge_steps.append({'range': [dte_put - 5, dte_put + 5], 'color': "#00FFFF"})
+    if dte_call: gauge_steps.append({'range': [dte_call - 5, dte_call + 5], 'color': "#FF00FF"})
 
     fig_gauge = go.Figure(go.Indicator(
         mode = "number+gauge",
@@ -124,17 +125,11 @@ if call_res and put_sup:
             'axis': {'range': [min_range, max_range], 'tickfont': {"color": "white"}},
             'bar': {'color': "white", 'thickness': 0.1},
             'steps': gauge_steps,
-            'threshold': {
-                'line': {'color': "yellow", 'width': 3},
-                'thickness': 0.75,
-                'value': hvl if hvl else (call_res + put_sup)/2
-            }
+            'threshold': {'line': {'color': "yellow", 'width': 3}, 'thickness': 0.75, 'value': hvl if hvl else (call_res + put_sup)/2}
         }
     ))
     fig_gauge.update_layout(height=150, margin=dict(t=20, b=20, l=100, r=20), template="plotly_dark", paper_bgcolor='#111111', plot_bgcolor='#111111')
     st.plotly_chart(fig_gauge, theme=None, use_container_width=True)
-    
-    st.markdown("<p style='text-align: center; color: gray; font-size: 14px;'><i>Yellow Line = High Vol Level (HVL). Translucent blocks = Core Walls. Solid bright bands = 0DTE Walls.</i></p>", unsafe_allow_html=True)
     st.divider()
 
 # 7. Chart Construction (Main Price Chart)
@@ -148,8 +143,26 @@ for index, row in filtered_levels.iterrows():
 fig.add_hline(y=em_upper, line_dash="dash", line_color="#00BFFF", line_width=1.5, annotation_text="+1 SD", annotation_position="bottom left", annotation_font=dict(color="white"), annotation_bgcolor="#00BFFF")
 fig.add_hline(y=em_lower, line_dash="dash", line_color="#00BFFF", line_width=1.5, annotation_text="-1 SD", annotation_position="top left", annotation_font=dict(color="white"), annotation_bgcolor="#00BFFF")
 
-fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=700, yaxis=dict(side="right"), paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=30, b=10))
+fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=600, yaxis=dict(side="right"), paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=30, b=10))
 st.plotly_chart(fig, theme=None, use_container_width=True)
+
+# --- NEW: Market Internals Section ---
+st.markdown("### 🩻 Market Internals (Momentum Engine)")
+int_col1, int_col2 = st.columns(2)
+
+def build_internal_chart(df, title, line_color, baseline=None):
+    fig_int = go.Figure()
+    if not df.empty:
+        fig_int.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', line=dict(color=line_color, width=2)))
+        if baseline is not None:
+            # Adds a distinct zero-line or baseline for internal indicators
+            fig_int.add_hline(y=baseline, line_dash="dash", line_color="white", line_width=1, opacity=0.5)
+            
+    fig_int.update_layout(title=dict(text=title, font=dict(size=14, color="white")), xaxis_rangeslider_visible=False, template="plotly_dark", height=250, paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=40, b=10), yaxis=dict(side="right"))
+    return fig_int
+
+with int_col1: st.plotly_chart(build_internal_chart(df_ad, "Advance/Decline Line (^ADD)", "#00FF00", baseline=0), theme=None, use_container_width=True)
+with int_col2: st.plotly_chart(build_internal_chart(df_trin, "Arms Index (^TRIN)", "#FF00FF", baseline=1.0), theme=None, use_container_width=True)
 
 st.divider()
 
