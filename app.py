@@ -4,10 +4,14 @@ import yfinance as yf
 import plotly.graph_objects as go
 import math
 import re
+from streamlit_autorefresh import st_autorefresh
 
-# 1. Page Configuration
+# 1. Page Configuration & Auto-Refresh Heartbeat
 st.set_page_config(page_title="Next Step Trading", layout="wide")
 st.markdown("<style>.block-container { padding-top: 1rem; padding-bottom: 1rem; }</style>", unsafe_allow_html=True)
+
+# Ping Yahoo Finance and refresh the page every 60 seconds automatically
+st_autorefresh(interval=60000, key="data_refresh")
 
 # 2. Sidebar Controls
 st.sidebar.title("🎛️ Dashboard Controls")
@@ -27,29 +31,32 @@ else: api_interval, api_period = "1d", "3mo"
 
 st.title(f"Next Step Trading: Daily Live Cockpit ({asset_label})")
 
-# 3. Fetch Market Data (Fixed Internals to Daily Macro Trend)
-@st.cache_data(ttl=300)
+# 3. Fetch Market Data & MTF Sentiment Data
+@st.cache_data(ttl=50) # Cache set slightly lower than auto-refresh to ensure fresh pulls
 def get_market_data(ticker, period, interval):
+    # Main Asset Data
     main_asset = yf.Ticker(ticker).history(period=period, interval=interval)
-    nq = yf.Ticker("NQ=F").history(period="2d", interval="15m")
-    btc = yf.Ticker("BTC-USD").history(period="2d", interval="15m")
-    vix = yf.Ticker("^VIX").history(period="1d")
     
-    # THE FIX: Force these two to Daily data ("1d") so Yahoo Finance actually returns them
-    ad_line = yf.Ticker("^ADD").history(period="3mo", interval="1d")
-    trin = yf.Ticker("^TRIN").history(period="3mo", interval="1d")
+    # Macro Data (Oil and VIX)
+    oil = yf.Ticker("CL=F").history(period="2d", interval="15m")
+    vix = yf.Ticker("^VIX").history(period="2d", interval="15m") # Intraday VIX
     
-    return main_asset, nq, btc, vix, ad_line, trin
+    # Multi-Timeframe Data for Confluence Engine
+    tf_15m = yf.Ticker(ticker).history(period="5d", interval="15m")
+    tf_1h = yf.Ticker(ticker).history(period="1mo", interval="1h")
+    tf_1d = yf.Ticker(ticker).history(period="6mo", interval="1d")
+    
+    return main_asset, oil, vix, tf_15m, tf_1h, tf_1d
 
-df_main, df_nq, df_btc, df_vix, df_ad, df_trin = get_market_data(active_ticker, api_period, api_interval)
+df_main, df_oil, df_vix, df_15m, df_1h, df_1d = get_market_data(active_ticker, api_period, api_interval)
 
 if df_main.empty:
     st.error("⚠️ Data temporarily unavailable.")
     st.stop()
 
 latest_price = df_main['Close'].iloc[-1]
-live_vix = df_vix['Close'].iloc[-1]
-daily_pct_move = (live_vix / math.sqrt(252)) / 100
+latest_vix = df_vix['Close'].iloc[-1] if not df_vix.empty else 15.0
+daily_pct_move = (latest_vix / math.sqrt(252)) / 100
 expected_move_points = latest_price * daily_pct_move
 em_upper, em_lower = latest_price + expected_move_points, latest_price - expected_move_points
 
@@ -57,15 +64,15 @@ em_upper, em_lower = latest_price + expected_move_points, latest_price - expecte
 st.markdown("### 📊 Live Market Vitals")
 col1, col2, col3, col4 = st.columns(4)
 col1.metric(label=f"{asset_label} (Live)", value=f"{latest_price:,.2f}")
-col2.metric(label="Volatility Index (VIX)", value=f"{live_vix:.2f}")
+col2.metric(label="Volatility Index (VIX)", value=f"{latest_vix:.2f}")
 col3.metric(label="Implied Daily Move", value=f"± {expected_move_points:.1f} pts")
 col4.metric(label="Implied Daily Range", value=f"{em_lower:.0f} - {em_upper:.0f}")
 
 st.divider()
 
-# 5. Database Connections
+# 5. Database Connections (Insert Links Here)
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?output=csv"
-MQ_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=1464368299&single=true&output=csv"
+MQ_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?output=csv"
 
 try:
     levels_df = pd.read_csv(SHEET_URL)
@@ -98,39 +105,29 @@ dte_put = next((val for key, val in mq_dict.items() if "0DTE Put" in key), None)
 
 if call_res and put_sup:
     st.markdown("### 🎯 Dealer Proximity Radar")
-    
     all_gauge_vals = [val for val in [put_sup, call_res, hvl, dte_call, dte_put, latest_price] if val is not None]
-    min_range = min(all_gauge_vals) - 15
-    max_range = max(all_gauge_vals) + 15
+    min_range, max_range = min(all_gauge_vals) - 15, max(all_gauge_vals) + 15
 
     gauge_steps = [
         {'range': [min_range, put_sup], 'color': "rgba(0, 255, 255, 0.15)"},
         {'range': [put_sup, call_res], 'color': "rgba(128, 128, 128, 0.1)"}, 
         {'range': [call_res, max_range], 'color': "rgba(255, 0, 255, 0.15)"} 
     ]
-    
     if dte_put: gauge_steps.append({'range': [dte_put - 5, dte_put + 5], 'color': "#00FFFF"})
     if dte_call: gauge_steps.append({'range': [dte_call - 5, dte_call + 5], 'color': "#FF00FF"})
 
     fig_gauge = go.Figure(go.Indicator(
-        mode = "number+gauge",
-        value = latest_price,
-        domain = {'x': [0.1, 1], 'y': [0, 1]},
-        title = {'text': "<b>Live Price</b>", 'font': {"color": "white", "size": 16}},
-        number = {'font': {"color": "white"}},
-        gauge = {
-            'shape': "bullet",
-            'axis': {'range': [min_range, max_range], 'tickfont': {"color": "white"}},
-            'bar': {'color': "white", 'thickness': 0.1},
-            'steps': gauge_steps,
-            'threshold': {'line': {'color': "yellow", 'width': 3}, 'thickness': 0.75, 'value': hvl if hvl else (call_res + put_sup)/2}
-        }
+        mode = "number+gauge", value = latest_price, domain = {'x': [0.1, 1], 'y': [0, 1]},
+        title = {'text': "<b>Live Price</b>", 'font': {"color": "white", "size": 16}}, number = {'font': {"color": "white"}},
+        gauge = {'shape': "bullet", 'axis': {'range': [min_range, max_range], 'tickfont': {"color": "white"}},
+                 'bar': {'color': "white", 'thickness': 0.1}, 'steps': gauge_steps,
+                 'threshold': {'line': {'color': "yellow", 'width': 3}, 'thickness': 0.75, 'value': hvl if hvl else (call_res + put_sup)/2}}
     ))
     fig_gauge.update_layout(height=150, margin=dict(t=20, b=20, l=100, r=20), template="plotly_dark", paper_bgcolor='#111111', plot_bgcolor='#111111')
     st.plotly_chart(fig_gauge, theme=None, use_container_width=True)
     st.divider()
 
-# 7. Chart Construction (Main Price Chart)
+# 7. Main Price Chart
 fig = go.Figure(data=[go.Candlestick(x=df_main.index, open=df_main['Open'], high=df_main['High'], low=df_main['Low'], close=df_main['Close'], name=asset_label)])
 
 for index, row in filtered_levels.iterrows():
@@ -143,35 +140,47 @@ fig.add_hline(y=em_lower, line_dash="dash", line_color="#00BFFF", line_width=1.5
 
 fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=600, yaxis=dict(side="right"), paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=30, b=10))
 st.plotly_chart(fig, theme=None, use_container_width=True)
+st.divider()
 
-# 8. Market Internals Section
-st.markdown("### 🩻 Market Internals (3-Month Macro Breadth)")
-int_col1, int_col2 = st.columns(2)
+# 8. NEW: Multi-Timeframe Trend Confluence Engine
+st.markdown("### 🧲 Trend Confluence Engine (Price vs Moving Averages)")
 
-def build_internal_chart(df, title, line_color, baseline=None):
-    fig_int = go.Figure()
-    if not df.empty:
-        # Changed mode to lines to show a continuous trend
-        fig_int.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', line=dict(color=line_color, width=2)))
-        if baseline is not None:
-            fig_int.add_hline(y=baseline, line_dash="dash", line_color="white", line_width=1, opacity=0.5)
-            
-    fig_int.update_layout(title=dict(text=title, font=dict(size=14, color="white")), xaxis_rangeslider_visible=False, template="plotly_dark", height=250, paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=40, b=10), yaxis=dict(side="right"))
-    return fig_int
+def analyze_trend(df):
+    if df.empty or len(df) < 50: return "Data Insufficient", "gray"
+    
+    # Calculate simple moving averages (20 fast, 50 slow)
+    df['SMA_20'] = df['Close'].rolling(window=20).mean()
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    
+    curr_price = df['Close'].iloc[-1]
+    sma_20 = df['SMA_20'].iloc[-1]
+    sma_50 = df['SMA_50'].iloc[-1]
+    
+    # Logic: Bullish if Price > Fast MA > Slow MA. Bearish if inverse.
+    if curr_price > sma_20 and sma_20 > sma_50: return "Strong Bullish", "#00FF00"
+    elif curr_price < sma_20 and sma_20 < sma_50: return "Strong Bearish", "#FF0000"
+    elif curr_price > sma_20: return "Weak Bullish / Choppy", "#8FBC8F"
+    else: return "Weak Bearish / Choppy", "#CD5C5C"
 
-with int_col1: st.plotly_chart(build_internal_chart(df_ad, "Advance/Decline Line (^ADD)", "#00FF00", baseline=0), theme=None, use_container_width=True)
-with int_col2: st.plotly_chart(build_internal_chart(df_trin, "Arms Index (^TRIN)", "#FF00FF", baseline=1.0), theme=None, use_container_width=True)
+trend_15m, color_15m = analyze_trend(df_15m)
+trend_1h, color_1h = analyze_trend(df_1h)
+trend_1d, color_1d = analyze_trend(df_1d)
+
+tcol1, tcol2, tcol3 = st.columns(3)
+with tcol1: st.markdown(f"<div style='text-align: center; padding: 10px; background-color: #222; border-radius: 5px; border-bottom: 5px solid {color_15m};'><b>15-Minute (Intraday)</b><br><span style='color: {color_15m}; font-size: 18px;'>{trend_15m}</span></div>", unsafe_allow_html=True)
+with tcol2: st.markdown(f"<div style='text-align: center; padding: 10px; background-color: #222; border-radius: 5px; border-bottom: 5px solid {color_1h};'><b>1-Hour (Swing)</b><br><span style='color: {color_1h}; font-size: 18px;'>{trend_1h}</span></div>", unsafe_allow_html=True)
+with tcol3: st.markdown(f"<div style='text-align: center; padding: 10px; background-color: #222; border-radius: 5px; border-bottom: 5px solid {color_1d};'><b>Daily (Macro)</b><br><span style='color: {color_1d}; font-size: 18px;'>{trend_1d}</span></div>", unsafe_allow_html=True)
 
 st.divider()
 
-# 9. Macro Engines
-st.markdown("### 🌐 Macro Liquidity & Risk Engine")
+# 9. Macro Engines (Now Candlesticks for Oil & VIX)
+st.markdown("### 🌐 Macro Risk Engine (Crude Oil & VIX)")
 macro_col1, macro_col2 = st.columns(2)
 
-def build_mini_chart(df, title, line_color):
-    fig_mini = go.Figure(go.Scatter(x=df.index, y=df['Close'], mode='lines', line=dict(color=line_color, width=2)))
-    fig_mini.update_layout(title=dict(text=title, font=dict(size=14, color="white")), xaxis_rangeslider_visible=False, template="plotly_dark", height=300, paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=40, b=10), yaxis=dict(side="right"))
+def build_candlestick_mini(df, title):
+    fig_mini = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
+    fig_mini.update_layout(title=dict(text=title, font=dict(size=14, color="white")), xaxis_rangeslider_visible=False, template="plotly_dark", height=350, paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=40, b=10), yaxis=dict(side="right"))
     return fig_mini
 
-with macro_col1: st.plotly_chart(build_mini_chart(df_nq, "Nasdaq-100 (NQ_F)", "#FF9900"), theme=None, use_container_width=True)
-with macro_col2: st.plotly_chart(build_mini_chart(df_btc, "Bitcoin (BTC-USD)", "#00FFCC"), theme=None, use_container_width=True)
+with macro_col1: st.plotly_chart(build_candlestick_mini(df_oil, "Crude Oil Futures (CL_F)"), theme=None, use_container_width=True)
+with macro_col2: st.plotly_chart(build_candlestick_mini(df_vix, "Volatility Index (VIX)"), theme=None, use_container_width=True)
