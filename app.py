@@ -68,7 +68,6 @@ SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EG
 MQ_ES_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=1464368299&single=true&output=csv"
 MQ_SPX_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=818488226&single=true&output=csv"
 
-# Dynamically assign the correct MenthorQ link based on the sidebar toggle
 active_mq_url = MQ_ES_SHEET_URL if active_ticker == "ES=F" else MQ_SPX_SHEET_URL
 
 try:
@@ -77,6 +76,7 @@ try:
 except:
     filtered_levels = pd.DataFrame()
 
+# Cleaned up parser to handle the new straightforward MenthorQ lines
 mq_dict = {}
 try:
     mq_df = pd.read_csv(active_mq_url, header=None)
@@ -99,10 +99,14 @@ put_sup = next((val for key, val in mq_dict.items() if "Put Support" in key and 
 hvl = next((val for key, val in mq_dict.items() if "HVL" in key or "High Vol Level" in key), None)
 dte_call = next((val for key, val in mq_dict.items() if "0DTE Call" in key), None)
 dte_put = next((val for key, val in mq_dict.items() if "0DTE Put" in key), None)
+# Updated to explicitly look for 1D Max and 1D Min
+range_high = next((val for key, val in mq_dict.items() if "1D Max" in key), None)
+range_low = next((val for key, val in mq_dict.items() if "1D Min" in key), None)
 
 if call_res and put_sup:
     st.markdown(f"### 🎯 Dealer Proximity Radar ({asset_label})")
-    all_gauge_vals = [val for val in [put_sup, call_res, hvl, dte_call, dte_put, latest_price] if val is not None]
+    
+    all_gauge_vals = [val for val in [put_sup, call_res, hvl, dte_call, dte_put, latest_price, range_high, range_low] if val is not None]
     min_range, max_range = min(all_gauge_vals) - 15, max(all_gauge_vals) + 15
 
     gauge_steps = [
@@ -120,19 +124,26 @@ if call_res and put_sup:
                  'bar': {'color': "white", 'thickness': 0.1}, 'steps': gauge_steps,
                  'threshold': {'line': {'color': "yellow", 'width': 3}, 'thickness': 0.75, 'value': hvl if hvl else (call_res + put_sup)/2}}
     ))
-    fig_gauge.update_layout(height=150, margin=dict(t=20, b=20, l=100, r=20), template="plotly_dark", paper_bgcolor='#111111', plot_bgcolor='#111111')
+    fig_gauge.update_layout(height=130, margin=dict(t=20, b=10, l=100, r=20), template="plotly_dark", paper_bgcolor='#111111', plot_bgcolor='#111111')
     st.plotly_chart(fig_gauge, theme=None, use_container_width=True)
     
-    # NEW: Dynamic HUD Text replacing hover functionality
-    hud_text = []
-    if dte_put: hud_text.append(f"<span style='color: #00FFFF;'><b>0DTE Put:</b> {dte_put:,.0f}</span>")
-    if put_sup: hud_text.append(f"<span style='color: #00FFFF;'><b>Put Support:</b> {put_sup:,.0f}</span>")
-    if hvl: hud_text.append(f"<span style='color: yellow;'><b>HVL:</b> {hvl:,.0f}</span>")
-    if call_res: hud_text.append(f"<span style='color: #FF00FF;'><b>Call Resistance:</b> {call_res:,.0f}</span>")
-    if dte_call: hud_text.append(f"<span style='color: #FF00FF;'><b>0DTE Call:</b> {dte_call:,.0f}</span>")
+    # High-Contrast Flexbox HUD
+    hud_html = "<div style='display: flex; justify-content: space-evenly; flex-wrap: wrap; background-color: #1A1A1A; padding: 12px; border-radius: 6px; border: 1px solid #333; margin-top: -15px; margin-bottom: 20px;'>"
     
-    st.markdown(f"<div style='text-align: center; font-size: 15px; padding-top: 5px;'>{' &nbsp;&nbsp;|&nbsp;&nbsp; '.join(hud_text)}</div>", unsafe_allow_html=True)
-    st.divider()
+    def add_hud_item(label, val, color):
+        if val: return f"<div style='text-align: center; margin: 5px 10px;'><div style='color: {color}; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;'>{label}</div><div style='color: white; font-size: 18px; font-weight: bold;'>{val:,.0f}</div></div>"
+        return ""
+        
+    hud_html += add_hud_item("1D Min", range_low, "#888888")
+    hud_html += add_hud_item("0DTE Put", dte_put, "#00FFFF")
+    hud_html += add_hud_item("Put Support", put_sup, "#00FFFF")
+    hud_html += add_hud_item("HVL", hvl, "#FFD700")
+    hud_html += add_hud_item("Call Res", call_res, "#FF00FF")
+    hud_html += add_hud_item("0DTE Call", dte_call, "#FF00FF")
+    hud_html += add_hud_item("1D Max", range_high, "#888888")
+    
+    hud_html += "</div>"
+    st.markdown(hud_html, unsafe_allow_html=True)
 
 # 7. Main Price Chart
 fig = go.Figure(data=[go.Candlestick(x=df_main.index, open=df_main['Open'], high=df_main['High'], low=df_main['Low'], close=df_main['Close'], name=asset_label)])
