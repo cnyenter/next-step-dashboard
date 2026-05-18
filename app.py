@@ -10,7 +10,6 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="Next Step Trading", layout="wide")
 st.markdown("<style>.block-container { padding-top: 1rem; padding-bottom: 1rem; }</style>", unsafe_allow_html=True)
 
-# Ping Yahoo Finance and refresh the page every 60 seconds automatically
 st_autorefresh(interval=60000, key="data_refresh")
 
 # 2. Sidebar Controls
@@ -32,20 +31,14 @@ else: api_interval, api_period = "1d", "3mo"
 st.title(f"Next Step Trading: Daily Live Cockpit ({asset_label})")
 
 # 3. Fetch Market Data & MTF Sentiment Data
-@st.cache_data(ttl=50) # Cache set slightly lower than auto-refresh to ensure fresh pulls
+@st.cache_data(ttl=50)
 def get_market_data(ticker, period, interval):
-    # Main Asset Data
     main_asset = yf.Ticker(ticker).history(period=period, interval=interval)
-    
-    # Macro Data (Oil and VIX)
     oil = yf.Ticker("CL=F").history(period="2d", interval="15m")
-    vix = yf.Ticker("^VIX").history(period="2d", interval="15m") # Intraday VIX
-    
-    # Multi-Timeframe Data for Confluence Engine
+    vix = yf.Ticker("^VIX").history(period="2d", interval="15m") 
     tf_15m = yf.Ticker(ticker).history(period="5d", interval="15m")
     tf_1h = yf.Ticker(ticker).history(period="1mo", interval="1h")
     tf_1d = yf.Ticker(ticker).history(period="6mo", interval="1d")
-    
     return main_asset, oil, vix, tf_15m, tf_1h, tf_1d
 
 df_main, df_oil, df_vix, df_15m, df_1h, df_1d = get_market_data(active_ticker, api_period, api_interval)
@@ -70,9 +63,13 @@ col4.metric(label="Implied Daily Range", value=f"{em_lower:.0f} - {em_upper:.0f}
 
 st.divider()
 
-# 5. Database Connections (Insert Links Here)
-SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?output=csv"
-MQ_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=1464368299&single=true&output=csv"
+# 5. Database Connections
+SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=0&single=true&output=csv"
+MQ_ES_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=1464368299&single=true&output=csv"
+MQ_SPX_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=818488226&single=true&output=csv"
+
+# Dynamically assign the correct MenthorQ link based on the sidebar toggle
+active_mq_url = MQ_ES_SHEET_URL if active_ticker == "ES=F" else MQ_SPX_SHEET_URL
 
 try:
     levels_df = pd.read_csv(SHEET_URL)
@@ -82,7 +79,7 @@ except:
 
 mq_dict = {}
 try:
-    mq_df = pd.read_csv(MQ_SHEET_URL, header=None)
+    mq_df = pd.read_csv(active_mq_url, header=None)
     if not mq_df.empty:
         mq_paste = mq_df.to_string(header=False, index=False) 
         for line in mq_paste.split('\n'):
@@ -104,7 +101,7 @@ dte_call = next((val for key, val in mq_dict.items() if "0DTE Call" in key), Non
 dte_put = next((val for key, val in mq_dict.items() if "0DTE Put" in key), None)
 
 if call_res and put_sup:
-    st.markdown("### 🎯 Dealer Proximity Radar")
+    st.markdown(f"### 🎯 Dealer Proximity Radar ({asset_label})")
     all_gauge_vals = [val for val in [put_sup, call_res, hvl, dte_call, dte_put, latest_price] if val is not None]
     min_range, max_range = min(all_gauge_vals) - 15, max(all_gauge_vals) + 15
 
@@ -125,6 +122,16 @@ if call_res and put_sup:
     ))
     fig_gauge.update_layout(height=150, margin=dict(t=20, b=20, l=100, r=20), template="plotly_dark", paper_bgcolor='#111111', plot_bgcolor='#111111')
     st.plotly_chart(fig_gauge, theme=None, use_container_width=True)
+    
+    # NEW: Dynamic HUD Text replacing hover functionality
+    hud_text = []
+    if dte_put: hud_text.append(f"<span style='color: #00FFFF;'><b>0DTE Put:</b> {dte_put:,.0f}</span>")
+    if put_sup: hud_text.append(f"<span style='color: #00FFFF;'><b>Put Support:</b> {put_sup:,.0f}</span>")
+    if hvl: hud_text.append(f"<span style='color: yellow;'><b>HVL:</b> {hvl:,.0f}</span>")
+    if call_res: hud_text.append(f"<span style='color: #FF00FF;'><b>Call Resistance:</b> {call_res:,.0f}</span>")
+    if dte_call: hud_text.append(f"<span style='color: #FF00FF;'><b>0DTE Call:</b> {dte_call:,.0f}</span>")
+    
+    st.markdown(f"<div style='text-align: center; font-size: 15px; padding-top: 5px;'>{' &nbsp;&nbsp;|&nbsp;&nbsp; '.join(hud_text)}</div>", unsafe_allow_html=True)
     st.divider()
 
 # 7. Main Price Chart
@@ -142,21 +149,15 @@ fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", heigh
 st.plotly_chart(fig, theme=None, use_container_width=True)
 st.divider()
 
-# 8. NEW: Multi-Timeframe Trend Confluence Engine
+# 8. Multi-Timeframe Trend Confluence Engine
 st.markdown("### 🧲 Trend Confluence Engine (Price vs Moving Averages)")
 
 def analyze_trend(df):
     if df.empty or len(df) < 50: return "Data Insufficient", "gray"
-    
-    # Calculate simple moving averages (20 fast, 50 slow)
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    curr_price, sma_20, sma_50 = df['Close'].iloc[-1], df['SMA_20'].iloc[-1], df['SMA_50'].iloc[-1]
     
-    curr_price = df['Close'].iloc[-1]
-    sma_20 = df['SMA_20'].iloc[-1]
-    sma_50 = df['SMA_50'].iloc[-1]
-    
-    # Logic: Bullish if Price > Fast MA > Slow MA. Bearish if inverse.
     if curr_price > sma_20 and sma_20 > sma_50: return "Strong Bullish", "#00FF00"
     elif curr_price < sma_20 and sma_20 < sma_50: return "Strong Bearish", "#FF0000"
     elif curr_price > sma_20: return "Weak Bullish / Choppy", "#8FBC8F"
@@ -173,7 +174,7 @@ with tcol3: st.markdown(f"<div style='text-align: center; padding: 10px; backgro
 
 st.divider()
 
-# 9. Macro Engines (Now Candlesticks for Oil & VIX)
+# 9. Macro Engines
 st.markdown("### 🌐 Macro Risk Engine (Crude Oil & VIX)")
 macro_col1, macro_col2 = st.columns(2)
 
