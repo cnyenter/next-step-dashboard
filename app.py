@@ -231,16 +231,30 @@ elif page_selection == "Alpha Playbook":
                 border_color = "#00FF00" if is_bull else "#FF0000"
                 bg_gradient = "rgba(0, 255, 0, 0.04)" if is_bull else "rgba(255, 0, 0, 0.04)"
                 
+                # Adaptive styling for Light/Dark mode
+                is_bull = "Bull" in direction
+                border_color = "#00CC00" if is_bull else "#FF3333" # Slightly darker for light mode contrast
+                bg_gradient = "rgba(0, 255, 0, 0.05)" if is_bull else "rgba(255, 0, 0, 0.05)"
+                
                 card_html = f"""
-                <div style='border: 1px solid {border_color}; background-color: {bg_gradient}; padding: 18px; border-radius: 8px; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.2);'>
-                    <div style='display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 10px; margin-bottom: 12px;'>
-                        <h3 style='margin: 0; color: white; font-size: 20px; letter-spacing: 0.5px;'>{ticker}</h3>
-                        <span style='background-color: {border_color}; color: black; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; letter-spacing: 0.5px;'>{tf} {direction.upper()}</span>
+                <div style='border: 2px solid {border_color}; background-color: {bg_gradient}; padding: 18px; border-radius: 8px; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);'>
+                    <div style='display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid gray; padding-bottom: 10px; margin-bottom: 12px;'>
+                        <h3 style='margin: 0; font-size: 22px; letter-spacing: 0.5px;'>{ticker}</h3>
+                        <span style='background-color: {border_color}; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; letter-spacing: 0.5px;'>{tf} {direction.upper()}</span>
                     </div>
                     <div style='display: flex; justify-content: space-between; text-align: center;'>
-                        <div style='flex: 1;'><div style='color: #888; font-size: 11px;'>ENTRY</div><div style='color: white; font-size: 16px; font-weight: bold; margin-top: 3px;'>{entry:,.2f}</div></div>
-                        <div style='flex: 1; border-left: 1px solid #333; border-right: 1px solid #333;'><div style='color: {border_color}; font-size: 11px;'>TARGET</div><div style='color: white; font-size: 16px; font-weight: bold; margin-top: 3px;'>{target:,.2f}</div></div>
-                        <div style='flex: 1;'><div style='color: #FF4444; font-size: 11px;'>STOP</div><div style='color: white; font-size: 16px; font-weight: bold; margin-top: 3px;'>{stop:,.2f}</div></div>
+                        <div style='flex: 1;'>
+                            <div style='color: gray; font-size: 11px; font-weight: bold; letter-spacing: 1px;'>ENTRY</div>
+                            <div style='font-size: 18px; font-weight: bold; margin-top: 4px;'>{entry:,.2f}</div>
+                        </div>
+                        <div style='flex: 1; border-left: 1px solid gray; border-right: 1px solid gray;'>
+                            <div style='color: {border_color}; font-size: 11px; font-weight: bold; letter-spacing: 1px;'>TARGET</div>
+                            <div style='font-size: 18px; font-weight: bold; margin-top: 4px;'>{target:,.2f}</div>
+                        </div>
+                        <div style='flex: 1;'>
+                            <div style='color: #FF4444; font-size: 11px; font-weight: bold; letter-spacing: 1px;'>STOP</div>
+                            <div style='font-size: 18px; font-weight: bold; margin-top: 4px;'>{stop:,.2f}</div>
+                        </div>
                     </div>
                 </div>
                 """
