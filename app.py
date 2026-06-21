@@ -63,10 +63,11 @@ col4.metric(label="Implied Daily Range", value=f"{em_lower:.0f} - {em_upper:.0f}
 
 st.divider()
 
-# 5. Database Connections
+# 5. Database Connections (PASTE LINKS HERE)
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=0&single=true&output=csv"
 MQ_ES_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=1464368299&single=true&output=csv"
-MQ_SPX_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=818488226&single=true&output=csv"
+MQ_SPX_SHEET_URL = https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=818488226&single=true&output=csv
+PLAYBOOK_SHEET_URL = https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=698367233&single=true&output=csv
 
 active_mq_url = MQ_ES_SHEET_URL if active_ticker == "ES=F" else MQ_SPX_SHEET_URL
 
@@ -76,7 +77,6 @@ try:
 except:
     filtered_levels = pd.DataFrame()
 
-# Cleaned up parser to handle the new straightforward MenthorQ lines
 mq_dict = {}
 try:
     mq_df = pd.read_csv(active_mq_url, header=None)
@@ -99,7 +99,6 @@ put_sup = next((val for key, val in mq_dict.items() if "Put Support" in key and 
 hvl = next((val for key, val in mq_dict.items() if "HVL" in key or "High Vol Level" in key), None)
 dte_call = next((val for key, val in mq_dict.items() if "0DTE Call" in key), None)
 dte_put = next((val for key, val in mq_dict.items() if "0DTE Put" in key), None)
-# Updated to explicitly look for 1D Max and 1D Min
 range_high = next((val for key, val in mq_dict.items() if "1D Max" in key), None)
 range_low = next((val for key, val in mq_dict.items() if "1D Min" in key), None)
 
@@ -129,11 +128,9 @@ if call_res and put_sup:
     
     # High-Contrast Flexbox HUD
     hud_html = "<div style='display: flex; justify-content: space-evenly; flex-wrap: wrap; background-color: #1A1A1A; padding: 12px; border-radius: 6px; border: 1px solid #333; margin-top: -15px; margin-bottom: 20px;'>"
-    
     def add_hud_item(label, val, color):
         if val: return f"<div style='text-align: center; margin: 5px 10px;'><div style='color: {color}; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;'>{label}</div><div style='color: white; font-size: 18px; font-weight: bold;'>{val:,.0f}</div></div>"
         return ""
-        
     hud_html += add_hud_item("1D Min", range_low, "#888888")
     hud_html += add_hud_item("0DTE Put", dte_put, "#00FFFF")
     hud_html += add_hud_item("Put Support", put_sup, "#00FFFF")
@@ -141,7 +138,6 @@ if call_res and put_sup:
     hud_html += add_hud_item("Call Res", call_res, "#FF00FF")
     hud_html += add_hud_item("0DTE Call", dte_call, "#FF00FF")
     hud_html += add_hud_item("1D Max", range_high, "#888888")
-    
     hud_html += "</div>"
     st.markdown(hud_html, unsafe_allow_html=True)
 
@@ -158,9 +154,50 @@ fig.add_hline(y=em_lower, line_dash="dash", line_color="#00BFFF", line_width=1.5
 
 fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=600, yaxis=dict(side="right"), paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=30, b=10))
 st.plotly_chart(fig, theme=None, use_container_width=True)
+
+# 8. NEW: Actionable Setups (Premium Options Playbook)
+st.markdown("### 🎯 Alpha Playbook (Premium Technical & Options Setups)")
+try:
+    playbook_df = pd.read_csv(PLAYBOOK_SHEET_URL)
+    playbook_df.dropna(subset=['Ticker'], inplace=True)
+    
+    if not playbook_df.empty:
+        cols = st.columns(len(playbook_df))
+        for index, row in playbook_df.iterrows():
+            ticker = str(row.get('Ticker', 'N/A')).upper()
+            direction = str(row.get('Direction', 'Bullish')).strip().title()
+            tf = str(row.get('Timeframe', '5D')).upper()
+            entry = row.get('Entry', 0)
+            target = row.get('Target', 0)
+            stop = row.get('Stop', 0)
+            
+            # Stylized border states based on direction
+            is_bull = "Bull" in direction
+            border_color = "#00FF00" if is_bull else "#FF0000"
+            bg_gradient = "rgba(0, 255, 0, 0.04)" if is_bull else "rgba(255, 0, 0, 0.04)"
+            
+            card_html = f"""
+            <div style='border: 1px solid {border_color}; background-color: {bg_gradient}; padding: 18px; border-radius: 8px; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.2);'>
+                <div style='display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 10px; margin-bottom: 12px;'>
+                    <h3 style='margin: 0; color: white; font-size: 20px; letter-spacing: 0.5px;'>{ticker}</h3>
+                    <span style='background-color: {border_color}; color: black; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; letter-spacing: 0.5px;'>{tf} {direction.upper()}</span>
+                </div>
+                <div style='display: flex; justify-content: space-between; text-align: center;'>
+                    <div style='flex: 1;'><div style='color: #888; font-size: 11px;'>ENTRY</div><div style='color: white; font-size: 16px; font-weight: bold; margin-top: 3px;'>{entry:,.2f}</div></div>
+                    <div style='flex: 1; border-left: 1px solid #333; border-right: 1px solid #333;'><div style='color: {border_color}; font-size: 11px;'>TARGET</div><div style='color: white; font-size: 16px; font-weight: bold; margin-top: 3px;'>{target:,.2f}</div></div>
+                    <div style='flex: 1;'><div style='color: #FF4444; font-size: 11px;'>STOP</div><div style='color: white; font-size: 16px; font-weight: bold; margin-top: 3px;'>{stop:,.2f}</div></div>
+                </div>
+            </div>
+            """
+            cols[index % len(cols)].markdown(card_html, unsafe_allow_html=True)
+    else:
+        st.markdown("<p style='color: gray; font-style: italic;'>Analyzing market structure for new asymmetric setups. Check back before market open.</p>", unsafe_allow_html=True)
+except Exception as e:
+    st.markdown("<p style='color: gray; font-style: italic;'>Premium Playbook engine initializing...</p>", unsafe_allow_html=True)
+
 st.divider()
 
-# 8. Multi-Timeframe Trend Confluence Engine
+# 9. Multi-Timeframe Trend Confluence Engine
 st.markdown("### 🧲 Trend Confluence Engine (Price vs Moving Averages)")
 
 def analyze_trend(df):
@@ -185,7 +222,7 @@ with tcol3: st.markdown(f"<div style='text-align: center; padding: 10px; backgro
 
 st.divider()
 
-# 9. Macro Engines
+# 10. Macro Engines
 st.markdown("### 🌐 Macro Risk Engine (Crude Oil & VIX)")
 macro_col1, macro_col2 = st.columns(2)
 
