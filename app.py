@@ -28,6 +28,13 @@ p, div, span { font-family: 'IBM Plex Sans', sans-serif; }
 .ns-sub { color: #9fadbd; font-size: 12.5px; margin-top: 3px; font-family: 'IBM Plex Mono', monospace; }
 .ns-panel { background: #151b26; border: 1px solid #232c3d; border-radius: 8px; padding: 16px 18px; margin-bottom: 8px; }
 .ns-section { font-family: 'Space Grotesk', sans-serif; font-size: 16px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #cbd6e2; margin: 10px 0 10px 2px; }
+.ns-radar-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.ns-radar-inner { min-width: 640px; }
+@media (max-width: 640px) {
+  .ns-tile { flex: 1 1 100%; min-width: 100%; }
+  .ns-value { font-size: 23px; }
+  .ns-section { font-size: 15px; }
+}
 </style>
 """
 st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
@@ -208,16 +215,40 @@ if page_selection == "Live Cockpit":
         zones += "<div style='position:absolute; top:44px; left:0; width:" + "{:.1f}".format(rpct(put_sup)) + "%; height:6px; background:rgba(38,166,154,0.28); border-radius:3px;'></div>"
         zones += "<div style='position:absolute; top:44px; left:" + "{:.1f}".format(rpct(call_res)) + "%; right:0; height:6px; background:rgba(239,83,80,0.28); border-radius:3px;'></div>"
 
+        lp_pct = rpct(latest_price)
+        MIN_GAP = 13.0         # % of track width needed between labels sharing a lane
+        LIVE_GAP = 12.0        # clearance required around the live price tag (lane 0)
+        # lane 0 = above track, lanes 1 and 2 = stacked below it
+        lane_top = {0: 0, 1: 50, 2: 78}
+        last_x = {0: -999.0, 1: -999.0, 2: -999.0}
+
         mk = ""
-        for i, (name, val, color) in enumerate(marks):
-            x = "{:.1f}".format(rpct(val))
-            if i % 2 == 0:
+        for name, val, color in marks:
+            x_val = rpct(val)
+            lane = None
+            for cand in (0, 1, 2):
+                if x_val - last_x[cand] < MIN_GAP:
+                    continue
+                if cand == 0 and abs(x_val - lp_pct) < LIVE_GAP:
+                    continue
+                lane = cand
+                break
+            if lane is None:
+                # nothing clear: take the lane with the most room, never lane 0 near the live tag
+                options = [c for c in (0, 1, 2) if not (c == 0 and abs(x_val - lp_pct) < LIVE_GAP)]
+                lane = max(options, key=lambda c: x_val - last_x[c])
+            last_x[lane] = x_val
+            x = "{:.1f}".format(x_val)
+
+            if lane == 0:
                 mk += ("<div style='position:absolute; left:" + x + "%; top:0; transform:translateX(-50%); text-align:center; width:96px;'>"
                        "<div style='color:" + color + "; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px;'>" + name + "</div>"
                        "<div style='color:" + TEXT + "; font-family:IBM Plex Mono,monospace; font-size:14px; font-weight:600;'>" + "{:,.0f}".format(val) + "</div>"
                        "<div style='width:2px; height:14px; background:" + color + "; margin:2px auto 0;'></div></div>")
             else:
-                mk += ("<div style='position:absolute; left:" + x + "%; top:50px; transform:translateX(-50%); text-align:center; width:96px;'>"
+                connector = "" if lane == 1 else "<div style='width:2px; height:28px; background:" + color + "; opacity:0.55; margin:0 auto;'></div>"
+                mk += ("<div style='position:absolute; left:" + x + "%; top:" + str(lane_top[lane]) + "px; transform:translateX(-50%); text-align:center; width:96px;'>"
+                       + connector +
                        "<div style='width:2px; height:14px; background:" + color + "; margin:0 auto 2px;'></div>"
                        "<div style='color:" + TEXT + "; font-family:IBM Plex Mono,monospace; font-size:14px; font-weight:600;'>" + "{:,.0f}".format(val) + "</div>"
                        "<div style='color:" + color + "; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px;'>" + name + "</div></div>")
@@ -228,9 +259,9 @@ if page_selection == "Live Cockpit":
                "<div style='width:2px; height:18px; background:white; margin:1px auto 0;'></div></div>")
 
         radar = ("<div class='ns-panel' style='padding:14px 40px 10px;'>"
-                 "<div style='position:relative; height:104px;'>"
+                 "<div class='ns-radar-scroll'><div class='ns-radar-inner' style='position:relative; height:136px;'>"
                  "<div style='position:absolute; top:44px; left:0; right:0; height:6px; background:#222a38; border-radius:3px;'></div>"
-                 + zones + mk + "</div></div>")
+                 + zones + mk + "</div></div></div>")
         st.markdown(radar, unsafe_allow_html=True)
 
     # ---- Main price chart with MAs and published level zones ----
@@ -249,13 +280,12 @@ if page_selection == "Live Cockpit":
             fig.add_trace(go.Scatter(x=df_main.index, y=series, mode='lines', name=p + ma_type,
                                      line=dict(color=ma_colors[p], width=1.3)))
 
-    # --- Lock the y-axis to the price action so level zones cannot flatten the candles ---
+    # --- Initial view is zoomed to the price action; ALL zones are drawn so zooming out reveals them ---
     p_hi, p_lo = float(df_main['High'].max()), float(df_main['Low'].min())
-    pad = max((p_hi - p_lo) * 0.10, expected_move_points * 0.35)
+    pad = max((p_hi - p_lo) * 0.07, expected_move_points * 0.12)
     y_hi, y_lo = p_hi + pad, p_lo - pad
 
-    # Draw only the zones that are actually in view, clipped to the visible window
-    visible_zones = []
+    all_zones = []
     for _, row in filtered_levels.iterrows():
         try:
             zone_type, bottom, top = row['Type'], float(row['Bottom']), float(row['Top'])
@@ -263,25 +293,29 @@ if page_selection == "Live Cockpit":
             continue
         if bottom > top:
             bottom, top = top, bottom
-        if top < y_lo or bottom > y_hi:
-            continue
-        visible_zones.append((str(zone_type).strip().lower() == "support", bottom, top))
+        all_zones.append((str(zone_type).strip().lower() == "support", bottom, top))
 
     # Stagger labels so stacked zones do not overprint each other
-    visible_zones.sort(key=lambda z: z[1])
-    last_label_y, x_slots, slot = None, [0.005, 0.13, 0.26], 0
-    for is_sup, bottom, top in visible_zones:
+    all_zones.sort(key=lambda z: z[1])
+    last_label_y, x_slots, slot = None, [0.005, 0.17, 0.34], 0
+    full_span = max(y_hi - y_lo, 1.0)
+    for is_sup, bottom, top in all_zones:
         fill_color = GREEN if is_sup else RED
         mid = (bottom + top) / 2.0
-        if last_label_y is not None and abs(mid - last_label_y) < (y_hi - y_lo) * 0.05:
+        if last_label_y is not None and abs(mid - last_label_y) < full_span * 0.05:
             slot = (slot + 1) % len(x_slots)
         else:
             slot = 0
         last_label_y = mid
-        fig.add_hrect(y0=max(bottom, y_lo), y1=min(top, y_hi), line_width=1, line_color=fill_color,
-                      fillcolor=fill_color, opacity=0.11, layer="below")
-        fig.add_annotation(xref="paper", x=x_slots[slot], y=min(top, y_hi), yanchor="top", xanchor="left",
-                           text=("S " if is_sup else "R ") + "{:,.0f}".format(mid),
+        zone_label = ("S " if is_sup else "R ")
+        if abs(top - bottom) < 0.5:
+            zone_label += "{:,.0f}".format(bottom)
+        else:
+            zone_label += "{:,.0f} – {:,.0f}".format(bottom, top)
+        fig.add_hrect(y0=bottom, y1=top, line_width=1, line_color=fill_color,
+                      fillcolor=fill_color, opacity=0.16, layer="below")
+        fig.add_annotation(xref="paper", x=x_slots[slot], y=top, yanchor="top", xanchor="left",
+                           text=zone_label,
                            showarrow=False, font=dict(color="white", size=12),
                            bgcolor="rgba(13,17,23,0.75)", borderpad=2)
 
@@ -291,17 +325,23 @@ if page_selection == "Live Cockpit":
                            showarrow=False, font=dict(color="white", size=12), bgcolor="#00BFFF", borderpad=3)
 
     fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=620,
-                      yaxis=dict(side="right", range=[y_lo, y_hi], tickfont=dict(size=13)),
-                      xaxis=dict(tickfont=dict(size=13)),
+                      yaxis=dict(side="right", range=[y_lo, y_hi], fixedrange=False, tickfont=dict(size=13)),
+                      xaxis=dict(fixedrange=False, tickfont=dict(size=13)),
+                      dragmode="pan",
                       paper_bgcolor=BG, plot_bgcolor="#10151f",
                       margin=dict(l=10, r=10, t=34, b=10),
                       legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
                                   bgcolor="rgba(0,0,0,0)", font=dict(size=13)))
-    st.plotly_chart(fig, theme=None, use_container_width=True)
+    st.plotly_chart(fig, theme=None, use_container_width=True,
+                    config={"scrollZoom": True, "displaylogo": False,
+                            "modeBarButtonsToRemove": ["select2d", "lasso2d"]})
+    st.caption("Chart opens zoomed to the session. Scroll or drag to zoom out — every published level is plotted, including those outside the current view.")
 
     # ---- Distance to Your Levels ladder ----
     if not filtered_levels.empty:
-        st.markdown("<div class='ns-section'>📏 Distance To The Published Levels</div>", unsafe_allow_html=True)
+        st.markdown("<div class='ns-section'>📏 Distance To The Published Levels "
+                    "<span style='font-size:12.5px; font-weight:400; text-transform:none; letter-spacing:0; color:" + MUTED + ";'>"
+                    "&nbsp;— points to the near edge of each zone</span></div>", unsafe_allow_html=True)
         rows = []
         for _, row in filtered_levels.iterrows():
             try:
@@ -309,21 +349,29 @@ if page_selection == "Live Cockpit":
                 rows.append((str(row['Type']).strip().title(), float(row['Bottom']), float(row['Top']), mid))
             except Exception:
                 continue
-        above = sorted([r for r in rows if r[3] >= latest_price], key=lambda r: r[3])[:4]
-        below = sorted([r for r in rows if r[3] < latest_price], key=lambda r: -r[3])[:4]
+        above = sorted([r for r in rows if r[3] >= latest_price], key=lambda r: r[3])[:5]
+        below = sorted([r for r in rows if r[3] < latest_price], key=lambda r: -r[3])[:5]
 
         def ladder_row(r, nearest):
             typ, bottom, top, mid = r
             color = GREEN if typ == "Support" else RED
-            dist = mid - latest_price
             border = "border:1px solid " + (BLUE if nearest else LINE) + ";"
             zone = "{:,.0f}".format(mid) if abs(top - bottom) < 1 else "{:,.0f} – {:,.0f}".format(bottom, top)
+            in_zone = bottom <= latest_price <= top
+            if in_zone:
+                dist_html = ("<span style='margin-left:auto; font-family:IBM Plex Mono,monospace; font-size:14px; font-weight:600; "
+                             "color:#0d1117; background:" + AMBER + "; padding:1px 8px; border-radius:4px;'>IN ZONE</span>")
+            else:
+                # Distance to the edge price would reach first, not the midpoint
+                edge = top if mid < latest_price else bottom
+                dist = edge - latest_price
+                dist_html = ("<span style='margin-left:auto; font-family:IBM Plex Mono,monospace; font-size:15px; font-weight:600; color:"
+                             + (GREEN if dist >= 0 else RED) + ";'>" + "{:+.1f} pts".format(dist) + "</span>")
             return ("<div style='display:flex; align-items:center; background:" + PANEL2 + "; " + border +
                     " border-radius:6px; padding:10px 14px; margin-bottom:7px;'>"
                     "<span style='width:10px; height:10px; border-radius:50%; background:" + color + "; margin-right:11px;'></span>"
                     "<span style='color:" + TEXT + "; font-size:15px;'>" + typ + " <span style='font-family:IBM Plex Mono,monospace; font-weight:600;'>" + zone + "</span></span>"
-                    "<span style='margin-left:auto; font-family:IBM Plex Mono,monospace; font-size:15px; font-weight:600; color:" + (GREEN if dist >= 0 else RED) + ";'>"
-                    + "{:+.1f} pts".format(dist) + "</span></div>")
+                    + dist_html + "</div>")
 
         col_a, col_b = st.columns(2)
         with col_a:
