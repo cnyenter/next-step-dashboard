@@ -1,6 +1,5 @@
 streamlit
+streamlit-autorefresh
 pandas
 yfinance
 plotly
-gspread
-streamlit-autorefresh
