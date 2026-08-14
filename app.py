@@ -6,34 +6,62 @@ import math
 import re
 from streamlit_autorefresh import st_autorefresh
 
-# 1. Page Configuration & Auto-Refresh Heartbeat
+# ==========================================
+# 1. PAGE CONFIG, BRAND TOKENS, GLOBAL STYLE
+# ==========================================
 st.set_page_config(page_title="Next Step Trading", layout="wide")
-st.markdown("<style>.block-container { padding-top: 1rem; padding-bottom: 1rem; }</style>", unsafe_allow_html=True)
+
+GREEN, RED, BLUE, AMBER, PURPLE = "#26a69a", "#ef5350", "#2962ff", "#f0b90b", "#ab47bc"
+BG, PANEL, PANEL2, LINE, TEXT, MUTED = "#0d1117", "#151b26", "#1a2230", "#232c3d", "#e6edf3", "#8b98a8"
+
+GLOBAL_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+.stApp { background-color: #0d1117; }
+.block-container { padding-top: 1rem; padding-bottom: 1rem; }
+h1, h2, h3, h4 { font-family: 'Space Grotesk', sans-serif !important; letter-spacing: -0.01em; }
+p, div, span { font-family: 'IBM Plex Sans', sans-serif; }
+.ns-row { display: flex; flex-wrap: wrap; margin: 0 -4px; }
+.ns-tile { flex: 1; min-width: 150px; background: #151b26; padding: 14px 16px; border: 1px solid #232c3d; border-radius: 8px; margin: 4px; }
+.ns-label { color: #8b98a8; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+.ns-value { color: #e6edf3; font-size: 22px; font-weight: 600; margin-top: 4px; font-family: 'IBM Plex Mono', monospace; }
+.ns-sub { color: #8b98a8; font-size: 11px; margin-top: 2px; font-family: 'IBM Plex Mono', monospace; }
+.ns-panel { background: #151b26; border: 1px solid #232c3d; border-radius: 8px; padding: 16px 18px; margin-bottom: 8px; }
+.ns-section { font-family: 'Space Grotesk', sans-serif; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #8b98a8; margin: 6px 0 8px 2px; }
+</style>
+"""
+st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
 
 st_autorefresh(interval=60000, key="data_refresh")
+
+def tile(label, value, sub="", color=TEXT):
+    return ("<div class='ns-tile'><div class='ns-label'>" + label + "</div>"
+            "<div class='ns-value' style='color:" + color + ";'>" + value + "</div>"
+            "<div class='ns-sub'>" + sub + "</div></div>")
 
 # ==========================================
 # 2. SIDEBAR NAVIGATION ROUTER
 # ==========================================
 st.sidebar.title("🧭 Navigation")
-page_selection = st.sidebar.radio("Select View:", ["Live Cockpit", "Alpha Playbook", "Swing Book"])
+page_selection = st.sidebar.radio("Select View:", ["Live Cockpit", "Swing Book"])
 st.sidebar.divider()
 
 # Database Connections (PASTE LINKS HERE)
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=0&single=true&output=csv"
 MQ_ES_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=1464368299&single=true&output=csv"
 MQ_SPX_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=818488226&single=true&output=csv"
-PLAYBOOK_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=698367233&single=true&output=csv"
 SWING_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=74511324&single=true&output=csv"
 
 # ==========================================
 # PAGE 1: LIVE COCKPIT
 # ==========================================
 if page_selection == "Live Cockpit":
-    
+
     st.sidebar.title("🎛️ Dashboard Controls")
     selected_asset = st.sidebar.radio("Select Active Asset:", ["E-mini Futures (ES_F)", "S&P 500 Index (SPX)"])
     selected_timeframe = st.sidebar.selectbox("Select Candle Interval:", ["1-Minute", "5-Minute", "15-Minute", "1-Hour", "Daily"], index=2)
+    ma_type = st.sidebar.radio("Moving Average Type:", ["EMA", "SMA"], horizontal=True)
+    show_mas = st.sidebar.multiselect("Moving Averages on Chart:", ["8", "21", "50", "100"], default=["8", "21", "50"])
 
     if selected_asset == "E-mini Futures (ES_F)":
         active_ticker, asset_label = "ES=F", "ES_F"
@@ -46,18 +74,30 @@ if page_selection == "Live Cockpit":
     elif "1-Hour" in selected_timeframe: api_interval, api_period = "1h", "10d"
     else: api_interval, api_period = "1d", "3mo"
 
-    st.title(f"Next Step Trading: Daily Live Cockpit ({asset_label})")
+    st.title("Next Step Trading: Daily Live Cockpit (" + asset_label + ")")
 
-    # Fetch Market Data & MTF Sentiment Data
+    # ---- Data fetch ----
     @st.cache_data(ttl=50)
     def get_market_data(ticker, period, interval):
         main_asset = yf.Ticker(ticker).history(period=period, interval=interval)
         oil = yf.Ticker("CL=F").history(period="2d", interval="15m")
-        vix = yf.Ticker("^VIX").history(period="2d", interval="15m") 
+        vix = yf.Ticker("^VIX").history(period="2d", interval="15m")
         tf_15m = yf.Ticker(ticker).history(period="5d", interval="15m")
         tf_1h = yf.Ticker(ticker).history(period="1mo", interval="1h")
         tf_1d = yf.Ticker(ticker).history(period="6mo", interval="1d")
         return main_asset, oil, vix, tf_15m, tf_1h, tf_1d
+
+    @st.cache_data(ttl=50)
+    def get_basis_prices():
+        out = {}
+        for sym in ["ES=F", "^SPX"]:
+            try:
+                h = yf.Ticker(sym).history(period="1d", interval="1m")
+                if not h.empty:
+                    out[sym] = float(h["Close"].iloc[-1])
+            except Exception:
+                pass
+        return out
 
     df_main, df_oil, df_vix, df_15m, df_1h, df_1d = get_market_data(active_ticker, api_period, api_interval)
 
@@ -65,208 +105,277 @@ if page_selection == "Live Cockpit":
         st.error("⚠️ Data temporarily unavailable.")
         st.stop()
 
-    latest_price = df_main['Close'].iloc[-1]
-    latest_vix = df_vix['Close'].iloc[-1] if not df_vix.empty else 15.0
+    latest_price = float(df_main['Close'].iloc[-1])
+    latest_vix = float(df_vix['Close'].iloc[-1]) if not df_vix.empty else 15.0
     daily_pct_move = (latest_vix / math.sqrt(252)) / 100
     expected_move_points = latest_price * daily_pct_move
     em_upper, em_lower = latest_price + expected_move_points, latest_price - expected_move_points
 
-    # Top Vitals Header
-    st.markdown("### 📊 Live Market Vitals")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric(label=f"{asset_label} (Live)", value=f"{latest_price:,.2f}")
-    col2.metric(label="Volatility Index (VIX)", value=f"{latest_vix:.2f}")
-    col3.metric(label="Implied Daily Move", value=f"± {expected_move_points:.1f} pts")
-    col4.metric(label="Implied Daily Range", value=f"{em_lower:.0f} - {em_upper:.0f}")
+    # Change vs prior daily close
+    chg_pct = None
+    try:
+        if len(df_1d) >= 2:
+            chg_pct = (latest_price / float(df_1d['Close'].iloc[-2]) - 1.0) * 100.0
+    except Exception:
+        pass
 
+    # Realized range today vs implied range
+    range_used = None
+    try:
+        last_day = df_15m.index[-1].date()
+        today_df = df_15m[[d.date() == last_day for d in df_15m.index]]
+        t_high, t_low = float(today_df['High'].max()), float(today_df['Low'].min())
+        if expected_move_points > 0:
+            range_used = (t_high - t_low) / (2 * expected_move_points) * 100.0
+    except Exception:
+        pass
+
+    # ES - SPX basis
+    basis = None
+    bp = get_basis_prices()
+    if "ES=F" in bp and "^SPX" in bp:
+        basis = bp["ES=F"] - bp["^SPX"]
+
+    # ---- Vitals row ----
+    price_color = TEXT if chg_pct is None else (GREEN if chg_pct >= 0 else RED)
+    vit = tile(asset_label + " (Live)", "{:,.2f}".format(latest_price),
+               ("" if chg_pct is None else "{:+.2f}% vs prior close".format(chg_pct)), price_color)
+    vit += tile("Volatility Index (VIX)", "{:.2f}".format(latest_vix), "drives the implied range")
+    vit += tile("Implied Daily Move", "± {:.1f} pts".format(expected_move_points),
+                "{:,.0f} – {:,.0f}".format(em_lower, em_upper))
+    if range_used is not None:
+        ru_color = GREEN if range_used < 80 else (AMBER if range_used < 110 else RED)
+        vit += tile("Range Used Today", "{:.0f}%".format(range_used), "of the implied range", ru_color)
+    if basis is not None:
+        vit += tile("ES – SPX Basis", "{:+.1f}".format(basis), "add to SPX levels for ES", BLUE)
+    st.markdown("<div class='ns-row'>" + vit + "</div>", unsafe_allow_html=True)
     st.divider()
 
-    active_mq_url = MQ_ES_SHEET_URL if active_ticker == "ES=F" else MQ_SPX_SHEET_URL
-
+    # ---- Published levels from sheet ----
+    levels_note = ""
     try:
         levels_df = pd.read_csv(SHEET_URL)
         filtered_levels = levels_df[levels_df['Ticker'] == active_ticker]
-    except:
+    except Exception:
         filtered_levels = pd.DataFrame()
+        levels_note = "Levels sheet unavailable — zones and ladder hidden."
+    if levels_note:
+        st.caption(levels_note)
 
+    # ---- MenthorQ dealer levels ----
+    active_mq_url = MQ_ES_SHEET_URL if active_ticker == "ES=F" else MQ_SPX_SHEET_URL
     mq_dict = {}
     try:
         mq_df = pd.read_csv(active_mq_url, header=None)
         if not mq_df.empty:
-            mq_paste = mq_df.to_string(header=False, index=False) 
-            for line in mq_paste.split(''):
+            mq_paste = mq_df.to_string(header=False, index=False)
+            for line in mq_paste.split('\n'):
                 if not line.strip(): continue
                 numbers = re.findall(r'[\d,]+\.?\d*', line)
                 if numbers:
                     val_str = numbers[-1]
                     val = float(val_str.replace(',', ''))
-                    name = line.rsplit(val_str, 1)[0].strip() 
+                    name = line.rsplit(val_str, 1)[0].strip()
                     mq_dict[name] = val
-    except:
-        pass 
+    except Exception:
+        pass
 
-    # Dealer Proximity Radar
-    call_res = next((val for key, val in mq_dict.items() if "Call Resistance" in key and "0DTE" not in key), None)
-    put_sup = next((val for key, val in mq_dict.items() if "Put Support" in key and "0DTE" not in key), None)
-    hvl = next((val for key, val in mq_dict.items() if "HVL" in key or "High Vol Level" in key), None)
-    dte_call = next((val for key, val in mq_dict.items() if "0DTE Call" in key), None)
-    dte_put = next((val for key, val in mq_dict.items() if "0DTE Put" in key), None)
-    range_high = next((val for key, val in mq_dict.items() if "1D Max" in key), None)
-    range_low = next((val for key, val in mq_dict.items() if "1D Min" in key), None)
+    call_res = next((v for k, v in mq_dict.items() if "Call Resistance" in k and "0DTE" not in k), None)
+    put_sup = next((v for k, v in mq_dict.items() if "Put Support" in k and "0DTE" not in k), None)
+    hvl = next((v for k, v in mq_dict.items() if "HVL" in k or "High Vol Level" in k), None)
+    dte_call = next((v for k, v in mq_dict.items() if "0DTE Call" in k), None)
+    dte_put = next((v for k, v in mq_dict.items() if "0DTE Put" in k), None)
+    range_high = next((v for k, v in mq_dict.items() if "1D Max" in k), None)
+    range_low = next((v for k, v in mq_dict.items() if "1D Min" in k), None)
 
+    # ---- Dealer Proximity Radar (HTML, matches Swing Book ladder language) ----
     if call_res and put_sup:
-        st.markdown(f"### 🎯 Dealer Proximity Radar ({asset_label})")
-        
-        all_gauge_vals = [val for val in [put_sup, call_res, hvl, dte_call, dte_put, latest_price, range_high, range_low] if val is not None]
-        min_range, max_range = min(all_gauge_vals) - 15, max(all_gauge_vals) + 15
+        st.markdown("<div class='ns-section'>🎯 Dealer Proximity Radar (" + asset_label + ")</div>", unsafe_allow_html=True)
 
-        gauge_steps = [
-            {'range': [min_range, put_sup], 'color': "rgba(0, 255, 255, 0.15)"},
-            {'range': [put_sup, call_res], 'color': "rgba(128, 128, 128, 0.1)"}, 
-            {'range': [call_res, max_range], 'color': "rgba(255, 0, 255, 0.15)"} 
-        ]
-        if dte_put: gauge_steps.append({'range': [dte_put - 5, dte_put + 5], 'color': "#00FFFF"})
-        if dte_call: gauge_steps.append({'range': [dte_call - 5, dte_call + 5], 'color': "#FF00FF"})
+        marks = [("1D Min", range_low, MUTED), ("0DTE Put", dte_put, GREEN), ("Put Support", put_sup, GREEN),
+                 ("HVL", hvl, AMBER), ("Call Res", call_res, RED), ("0DTE Call", dte_call, RED), ("1D Max", range_high, MUTED)]
+        marks = [(n, float(v), c) for (n, v, c) in marks if v is not None]
+        marks.sort(key=lambda m: m[1])
 
-        fig_gauge = go.Figure(go.Indicator(
-            mode = "number+gauge", value = latest_price, domain = {'x': [0.1, 1], 'y': [0, 1]},
-            title = {'text': "<b>Live Price</b>", 'font': {"color": "white", "size": 16}}, number = {'font': {"color": "white"}},
-            gauge = {'shape': "bullet", 'axis': {'range': [min_range, max_range], 'tickfont': {"color": "white"}},
-                     'bar': {'color': "white", 'thickness': 0.1}, 'steps': gauge_steps,
-                     'threshold': {'line': {'color': "yellow", 'width': 3}, 'thickness': 0.75, 'value': hvl if hvl else (call_res + put_sup)/2}}
-        ))
-        fig_gauge.update_layout(height=130, margin=dict(t=20, b=10, l=100, r=20), template="plotly_dark", paper_bgcolor='#111111', plot_bgcolor='#111111')
-        st.plotly_chart(fig_gauge, theme=None, use_container_width=True)
-        
-        # High-Contrast Flexbox HUD
-        hud_html = "<div style='display: flex; justify-content: space-evenly; flex-wrap: wrap; background-color: #1A1A1A; padding: 12px; border-radius: 6px; border: 1px solid #333; margin-top: -15px; margin-bottom: 20px;'>"
-        def add_hud_item(label, val, color):
-            if val: return f"<div style='text-align: center; margin: 5px 10px;'><div style='color: {color}; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;'>{label}</div><div style='color: white; font-size: 18px; font-weight: bold;'>{val:,.0f}</div></div>"
-            return ""
-        hud_html += add_hud_item("1D Min", range_low, "#888888")
-        hud_html += add_hud_item("0DTE Put", dte_put, "#00FFFF")
-        hud_html += add_hud_item("Put Support", put_sup, "#00FFFF")
-        hud_html += add_hud_item("HVL", hvl, "#FFD700")
-        hud_html += add_hud_item("Call Res", call_res, "#FF00FF")
-        hud_html += add_hud_item("0DTE Call", dte_call, "#FF00FF")
-        hud_html += add_hud_item("1D Max", range_high, "#888888")
-        hud_html += "</div>"
-        st.markdown(hud_html, unsafe_allow_html=True)
+        all_vals = [v for _, v, _ in marks] + [latest_price]
+        lo, hi = min(all_vals) - 15.0, max(all_vals) + 15.0
+        span = hi - lo
 
-    # Main Price Chart
-    fig = go.Figure(data=[go.Candlestick(x=df_main.index, open=df_main['Open'], high=df_main['High'], low=df_main['Low'], close=df_main['Close'], name=asset_label)])
+        def rpct(v):
+            return max(0.0, min(100.0, (v - lo) / span * 100.0))
 
-    for index, row in filtered_levels.iterrows():
-        zone_type, bottom, top = row['Type'], row['Bottom'], row['Top']
-        fill_color, border_color = ("#00FF00", "#00CC00") if zone_type == "Support" else ("#FF0000", "#CC0000")
-        fig.add_hrect(y0=bottom, y1=top, line_width=1, line_color=border_color, fillcolor=fill_color, opacity=0.35, annotation_text=zone_type, annotation_position="top left", annotation_font=dict(color="white", size=12))
+        zones = ""
+        zones += "<div style='position:absolute; top:44px; left:0; width:" + "{:.1f}".format(rpct(put_sup)) + "%; height:6px; background:rgba(38,166,154,0.28); border-radius:3px;'></div>"
+        zones += "<div style='position:absolute; top:44px; left:" + "{:.1f}".format(rpct(call_res)) + "%; right:0; height:6px; background:rgba(239,83,80,0.28); border-radius:3px;'></div>"
 
-    fig.add_hline(y=em_upper, line_dash="dash", line_color="#00BFFF", line_width=1.5, annotation_text="+1 SD", annotation_position="bottom left", annotation_font=dict(color="white"), annotation_bgcolor="#00BFFF")
-    fig.add_hline(y=em_lower, line_dash="dash", line_color="#00BFFF", line_width=1.5, annotation_text="-1 SD", annotation_position="top left", annotation_font=dict(color="white"), annotation_bgcolor="#00BFFF")
+        mk = ""
+        for i, (name, val, color) in enumerate(marks):
+            x = "{:.1f}".format(rpct(val))
+            if i % 2 == 0:
+                mk += ("<div style='position:absolute; left:" + x + "%; top:0; transform:translateX(-50%); text-align:center; width:86px;'>"
+                       "<div style='color:" + color + "; font-size:9px; text-transform:uppercase; letter-spacing:0.5px;'>" + name + "</div>"
+                       "<div style='color:" + TEXT + "; font-family:IBM Plex Mono,monospace; font-size:11px;'>" + "{:,.0f}".format(val) + "</div>"
+                       "<div style='width:2px; height:14px; background:" + color + "; margin:2px auto 0;'></div></div>")
+            else:
+                mk += ("<div style='position:absolute; left:" + x + "%; top:50px; transform:translateX(-50%); text-align:center; width:86px;'>"
+                       "<div style='width:2px; height:14px; background:" + color + "; margin:0 auto 2px;'></div>"
+                       "<div style='color:" + TEXT + "; font-family:IBM Plex Mono,monospace; font-size:11px;'>" + "{:,.0f}".format(val) + "</div>"
+                       "<div style='color:" + color + "; font-size:9px; text-transform:uppercase; letter-spacing:0.5px;'>" + name + "</div></div>")
 
-    fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=600, yaxis=dict(side="right"), paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=30, b=10))
+        lp = "{:.1f}".format(rpct(latest_price))
+        mk += ("<div style='position:absolute; left:" + lp + "%; top:30px; transform:translateX(-50%); text-align:center; z-index:3;'>"
+               "<div style='background:" + BLUE + "; color:white; font-family:IBM Plex Mono,monospace; font-size:11px; font-weight:600; padding:1px 6px; border-radius:4px;'>" + "{:,.1f}".format(latest_price) + "</div>"
+               "<div style='width:2px; height:16px; background:white; margin:1px auto 0;'></div></div>")
+
+        radar = ("<div class='ns-panel' style='padding:14px 40px 10px;'>"
+                 "<div style='position:relative; height:104px;'>"
+                 "<div style='position:absolute; top:44px; left:0; right:0; height:6px; background:#222a38; border-radius:3px;'></div>"
+                 + zones + mk + "</div></div>")
+        st.markdown(radar, unsafe_allow_html=True)
+
+    # ---- Main price chart with MAs and published level zones ----
+    fig = go.Figure(data=[go.Candlestick(x=df_main.index, open=df_main['Open'], high=df_main['High'], low=df_main['Low'], close=df_main['Close'],
+                                         name=asset_label, increasing_line_color=GREEN, increasing_fillcolor=GREEN,
+                                         decreasing_line_color=RED, decreasing_fillcolor=RED)])
+
+    ma_colors = {"8": "#e6edf3", "21": BLUE, "50": AMBER, "100": PURPLE}
+    for p in show_mas:
+        n = int(p)
+        if len(df_main) > n:
+            if ma_type == "EMA":
+                series = df_main['Close'].ewm(span=n, adjust=False).mean()
+            else:
+                series = df_main['Close'].rolling(window=n).mean()
+            fig.add_trace(go.Scatter(x=df_main.index, y=series, mode='lines', name=p + ma_type,
+                                     line=dict(color=ma_colors[p], width=1.3)))
+
+    for _, row in filtered_levels.iterrows():
+        try:
+            zone_type, bottom, top = row['Type'], float(row['Bottom']), float(row['Top'])
+        except Exception:
+            continue
+        is_sup = str(zone_type).strip().lower() == "support"
+        fill_color = GREEN if is_sup else RED
+        label = ("Support " if is_sup else "Resistance ") + "{:,.0f}".format((bottom + top) / 2)
+        fig.add_hrect(y0=bottom, y1=top, line_width=1, line_color=fill_color, fillcolor=fill_color, opacity=0.14,
+                      annotation_text=label, annotation_position="top left",
+                      annotation_font=dict(color="white", size=11))
+
+    fig.add_hline(y=em_upper, line_dash="dash", line_color="#00BFFF", line_width=1.2, annotation_text="+1 SD",
+                  annotation_position="bottom left", annotation_font=dict(color="white"), annotation_bgcolor="#00BFFF")
+    fig.add_hline(y=em_lower, line_dash="dash", line_color="#00BFFF", line_width=1.2, annotation_text="-1 SD",
+                  annotation_position="top left", annotation_font=dict(color="white"), annotation_bgcolor="#00BFFF")
+
+    fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=600,
+                      yaxis=dict(side="right"), paper_bgcolor=BG, plot_bgcolor="#10151f",
+                      margin=dict(l=10, r=10, t=30, b=10),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
+                                  bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
     st.plotly_chart(fig, theme=None, use_container_width=True)
+
+    # ---- Distance to Your Levels ladder ----
+    if not filtered_levels.empty:
+        st.markdown("<div class='ns-section'>📏 Distance To The Published Levels</div>", unsafe_allow_html=True)
+        rows = []
+        for _, row in filtered_levels.iterrows():
+            try:
+                mid = (float(row['Bottom']) + float(row['Top'])) / 2.0
+                rows.append((str(row['Type']).strip().title(), float(row['Bottom']), float(row['Top']), mid))
+            except Exception:
+                continue
+        above = sorted([r for r in rows if r[3] >= latest_price], key=lambda r: r[3])[:4]
+        below = sorted([r for r in rows if r[3] < latest_price], key=lambda r: -r[3])[:4]
+
+        def ladder_row(r, nearest):
+            typ, bottom, top, mid = r
+            color = GREEN if typ == "Support" else RED
+            dist = mid - latest_price
+            border = "border:1px solid " + (BLUE if nearest else LINE) + ";"
+            zone = "{:,.0f}".format(mid) if abs(top - bottom) < 1 else "{:,.0f} – {:,.0f}".format(bottom, top)
+            return ("<div style='display:flex; align-items:center; background:" + PANEL2 + "; " + border +
+                    " border-radius:6px; padding:8px 12px; margin-bottom:6px;'>"
+                    "<span style='width:9px; height:9px; border-radius:50%; background:" + color + "; margin-right:10px;'></span>"
+                    "<span style='color:" + TEXT + "; font-size:13px;'>" + typ + " <span style='font-family:IBM Plex Mono,monospace;'>" + zone + "</span></span>"
+                    "<span style='margin-left:auto; font-family:IBM Plex Mono,monospace; font-size:13px; font-weight:600; color:" + (GREEN if dist >= 0 else RED) + ";'>"
+                    + "{:+.1f} pts".format(dist) + "</span></div>")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            html = "<div class='ns-panel'><div class='ns-label' style='margin-bottom:8px;'>Overhead</div>"
+            if above:
+                for i, r in enumerate(reversed(above)):
+                    html += ladder_row(r, nearest=(i == len(above) - 1))
+            else:
+                html += "<div style='color:" + MUTED + "; font-size:12px;'>No published levels overhead.</div>"
+            html += "</div>"
+            st.markdown(html, unsafe_allow_html=True)
+        with col_b:
+            html = "<div class='ns-panel'><div class='ns-label' style='margin-bottom:8px;'>Below</div>"
+            if below:
+                for i, r in enumerate(below):
+                    html += ladder_row(r, nearest=(i == 0))
+            else:
+                html += "<div style='color:" + MUTED + "; font-size:12px;'>No published levels below.</div>"
+            html += "</div>"
+            st.markdown(html, unsafe_allow_html=True)
+
     st.divider()
 
-    # Multi-Timeframe Trend Confluence Engine
-    st.markdown("### 🧲 Trend Confluence Engine (Price vs Moving Averages)")
+    # ---- Multi-Timeframe Trend Confluence ----
+    st.markdown("<div class='ns-section'>🧲 Trend Confluence Engine (Price vs Moving Averages)</div>", unsafe_allow_html=True)
 
     def analyze_trend(df):
-        if df.empty or len(df) < 50: return "Data Insufficient", "gray"
-        df['SMA_20'] = df['Close'].rolling(window=20).mean()
-        df['SMA_50'] = df['Close'].rolling(window=50).mean()
-        curr_price, sma_20, sma_50 = df['Close'].iloc[-1], df['SMA_20'].iloc[-1], df['SMA_50'].iloc[-1]
-        
-        if curr_price > sma_20 and sma_20 > sma_50: return "Strong Bullish", "#00FF00"
-        elif curr_price < sma_20 and sma_20 < sma_50: return "Strong Bearish", "#FF0000"
-        elif curr_price > sma_20: return "Weak Bullish / Choppy", "#8FBC8F"
-        else: return "Weak Bearish / Choppy", "#CD5C5C"
+        if df.empty or len(df) < 50: return "Data Insufficient", MUTED
+        d = df.copy()
+        d['SMA_20'] = d['Close'].rolling(window=20).mean()
+        d['SMA_50'] = d['Close'].rolling(window=50).mean()
+        curr, s20, s50 = d['Close'].iloc[-1], d['SMA_20'].iloc[-1], d['SMA_50'].iloc[-1]
+        if curr > s20 and s20 > s50: return "Strong Bullish", GREEN
+        elif curr < s20 and s20 < s50: return "Strong Bearish", RED
+        elif curr > s20: return "Weak Bullish / Choppy", "#5c8d89"
+        else: return "Weak Bearish / Choppy", "#b46a68"
 
-    trend_15m, color_15m = analyze_trend(df_15m)
-    trend_1h, color_1h = analyze_trend(df_1h)
-    trend_1d, color_1d = analyze_trend(df_1d)
-
-    tcol1, tcol2, tcol3 = st.columns(3)
-    with tcol1: st.markdown(f"<div style='text-align: center; padding: 10px; background-color: #222; border-radius: 5px; border-bottom: 5px solid {color_15m};'><b>15-Minute (Intraday)</b><br><span style='color: {color_15m}; font-size: 18px;'>{trend_15m}</span></div>", unsafe_allow_html=True)
-    with tcol2: st.markdown(f"<div style='text-align: center; padding: 10px; background-color: #222; border-radius: 5px; border-bottom: 5px solid {color_1h};'><b>1-Hour (Swing)</b><br><span style='color: {color_1h}; font-size: 18px;'>{trend_1h}</span></div>", unsafe_allow_html=True)
-    with tcol3: st.markdown(f"<div style='text-align: center; padding: 10px; background-color: #222; border-radius: 5px; border-bottom: 5px solid {color_1d};'><b>Daily (Macro)</b><br><span style='color: {color_1d}; font-size: 18px;'>{trend_1d}</span></div>", unsafe_allow_html=True)
+    trends = [("15-Minute (Intraday)", *analyze_trend(df_15m)),
+              ("1-Hour (Swing)", *analyze_trend(df_1h)),
+              ("Daily (Macro)", *analyze_trend(df_1d))]
+    tr_html = ""
+    for name, label, color in trends:
+        tr_html += ("<div class='ns-tile' style='text-align:center; border-bottom:4px solid " + color + ";'>"
+                    "<div class='ns-label'>" + name + "</div>"
+                    "<div style='color:" + color + "; font-size:17px; font-weight:600; margin-top:6px;'>" + label + "</div></div>")
+    st.markdown("<div class='ns-row'>" + tr_html + "</div>", unsafe_allow_html=True)
 
     st.divider()
 
-    # Macro Engines
-    st.markdown("### 🌐 Macro Risk Engine (Crude Oil & VIX)")
+    # ---- Macro Risk Engine ----
+    st.markdown("<div class='ns-section'>🌐 Macro Risk Engine (Crude Oil & VIX)</div>", unsafe_allow_html=True)
     macro_col1, macro_col2 = st.columns(2)
 
     def build_candlestick_mini(df, title):
-        fig_mini = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
-        fig_mini.update_layout(title=dict(text=title, font=dict(size=14, color="white")), xaxis_rangeslider_visible=False, template="plotly_dark", height=350, paper_bgcolor='#111111', plot_bgcolor='#111111', margin=dict(l=10, r=10, t=40, b=10), yaxis=dict(side="right"))
+        chg = ""
+        try:
+            c0, c1 = float(df['Close'].iloc[0]), float(df['Close'].iloc[-1])
+            chg = "  ({:+.1f}%)".format((c1 / c0 - 1) * 100.0)
+        except Exception:
+            pass
+        fig_mini = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+                                                  increasing_line_color=GREEN, increasing_fillcolor=GREEN,
+                                                  decreasing_line_color=RED, decreasing_fillcolor=RED)])
+        fig_mini.update_layout(title=dict(text=title + chg, font=dict(size=14, color="white")),
+                               xaxis_rangeslider_visible=False, template="plotly_dark", height=330,
+                               paper_bgcolor=BG, plot_bgcolor="#10151f",
+                               margin=dict(l=10, r=10, t=40, b=10), yaxis=dict(side="right"))
         return fig_mini
 
     with macro_col1: st.plotly_chart(build_candlestick_mini(df_oil, "Crude Oil Futures (CL_F)"), theme=None, use_container_width=True)
     with macro_col2: st.plotly_chart(build_candlestick_mini(df_vix, "Volatility Index (VIX)"), theme=None, use_container_width=True)
 
-# ==========================================
-# PAGE 2: ALPHA PLAYBOOK
-# ==========================================
-elif page_selection == "Alpha Playbook":
-    
-    st.title("🎯 Next Step Trading: Alpha Playbook")
-    st.markdown("<p style='color: gray; font-size: 16px;'>Premium Technical & Options Setups</p>", unsafe_allow_html=True)
-    st.divider()
-
-    try:
-        playbook_df = pd.read_csv(PLAYBOOK_SHEET_URL)
-        playbook_df.dropna(subset=['Ticker'], inplace=True)
-        
-        if not playbook_df.empty:
-            cols = st.columns(len(playbook_df))
-            for index, row in playbook_df.iterrows():
-                ticker = str(row.get('Ticker', 'N/A')).upper()
-                direction = str(row.get('Direction', 'Bullish')).strip().title()
-                tf = str(row.get('Timeframe', '5D')).upper()
-                entry = row.get('Entry', 0)
-                target = row.get('Target', 0)
-                stop = row.get('Stop', 0)
-                
-                is_bull = "Bull" in direction
-                border_color = "#00FF00" if is_bull else "#FF0000"
-                bg_gradient = "rgba(0, 255, 0, 0.04)" if is_bull else "rgba(255, 0, 0, 0.04)"
-                
-                # Adaptive styling for Light/Dark mode
-                is_bull = "Bull" in direction
-                border_color = "#00CC00" if is_bull else "#FF3333" # Slightly darker for light mode contrast
-                bg_gradient = "rgba(0, 255, 0, 0.05)" if is_bull else "rgba(255, 0, 0, 0.05)"
-                
-                card_html = f"""
-                <div style='border: 2px solid {border_color}; background-color: {bg_gradient}; padding: 18px; border-radius: 8px; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);'>
-                    <div style='display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid gray; padding-bottom: 10px; margin-bottom: 12px;'>
-                        <h3 style='margin: 0; font-size: 22px; letter-spacing: 0.5px;'>{ticker}</h3>
-                        <span style='background-color: {border_color}; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; letter-spacing: 0.5px;'>{tf} {direction.upper()}</span>
-                    </div>
-                    <div style='display: flex; justify-content: space-between; text-align: center;'>
-                        <div style='flex: 1;'>
-                            <div style='color: gray; font-size: 11px; font-weight: bold; letter-spacing: 1px;'>ENTRY</div>
-                            <div style='font-size: 18px; font-weight: bold; margin-top: 4px;'>{entry:,.2f}</div>
-                        </div>
-                        <div style='flex: 1; border-left: 1px solid gray; border-right: 1px solid gray;'>
-                            <div style='color: {border_color}; font-size: 11px; font-weight: bold; letter-spacing: 1px;'>TARGET</div>
-                            <div style='font-size: 18px; font-weight: bold; margin-top: 4px;'>{target:,.2f}</div>
-                        </div>
-                        <div style='flex: 1;'>
-                            <div style='color: #FF4444; font-size: 11px; font-weight: bold; letter-spacing: 1px;'>STOP</div>
-                            <div style='font-size: 18px; font-weight: bold; margin-top: 4px;'>{stop:,.2f}</div>
-                        </div>
-                    </div>
-                </div>
-                """
-                cols[index % len(cols)].markdown(card_html, unsafe_allow_html=True)
-        else:
-            st.info("Analyzing market structure for new asymmetric setups. Check back before market open.")
-    except Exception as e:
-        st.info("Playbook data currently unavailable. Ensure the Google Sheet link is correct.")
+    st.markdown("<p style='color:" + MUTED + "; font-size:11px; text-align:center; margin-top:10px;'>"
+                "Prices via Yahoo Finance and may be delayed. This is not trading advice. This is purely for information/education.</p>",
+                unsafe_allow_html=True)
 
 # ==========================================
-# PAGE 3: SWING BOOK
+# PAGE 2: SWING BOOK
 # ==========================================
 elif page_selection == "Swing Book":
 
