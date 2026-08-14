@@ -23,11 +23,11 @@ h1, h2, h3, h4 { font-family: 'Space Grotesk', sans-serif !important; letter-spa
 p, div, span { font-family: 'IBM Plex Sans', sans-serif; }
 .ns-row { display: flex; flex-wrap: wrap; margin: 0 -4px; }
 .ns-tile { flex: 1; min-width: 150px; background: #151b26; padding: 14px 16px; border: 1px solid #232c3d; border-radius: 8px; margin: 4px; }
-.ns-label { color: #8b98a8; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
-.ns-value { color: #e6edf3; font-size: 22px; font-weight: 600; margin-top: 4px; font-family: 'IBM Plex Mono', monospace; }
-.ns-sub { color: #8b98a8; font-size: 11px; margin-top: 2px; font-family: 'IBM Plex Mono', monospace; }
+.ns-label { color: #a8b6c6; font-size: 12.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; }
+.ns-value { color: #e6edf3; font-size: 26px; font-weight: 600; margin-top: 5px; font-family: 'IBM Plex Mono', monospace; }
+.ns-sub { color: #9fadbd; font-size: 12.5px; margin-top: 3px; font-family: 'IBM Plex Mono', monospace; }
 .ns-panel { background: #151b26; border: 1px solid #232c3d; border-radius: 8px; padding: 16px 18px; margin-bottom: 8px; }
-.ns-section { font-family: 'Space Grotesk', sans-serif; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #8b98a8; margin: 6px 0 8px 2px; }
+.ns-section { font-family: 'Space Grotesk', sans-serif; font-size: 16px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #cbd6e2; margin: 10px 0 10px 2px; }
 </style>
 """
 st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
@@ -212,20 +212,20 @@ if page_selection == "Live Cockpit":
         for i, (name, val, color) in enumerate(marks):
             x = "{:.1f}".format(rpct(val))
             if i % 2 == 0:
-                mk += ("<div style='position:absolute; left:" + x + "%; top:0; transform:translateX(-50%); text-align:center; width:86px;'>"
-                       "<div style='color:" + color + "; font-size:9px; text-transform:uppercase; letter-spacing:0.5px;'>" + name + "</div>"
-                       "<div style='color:" + TEXT + "; font-family:IBM Plex Mono,monospace; font-size:11px;'>" + "{:,.0f}".format(val) + "</div>"
+                mk += ("<div style='position:absolute; left:" + x + "%; top:0; transform:translateX(-50%); text-align:center; width:96px;'>"
+                       "<div style='color:" + color + "; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px;'>" + name + "</div>"
+                       "<div style='color:" + TEXT + "; font-family:IBM Plex Mono,monospace; font-size:14px; font-weight:600;'>" + "{:,.0f}".format(val) + "</div>"
                        "<div style='width:2px; height:14px; background:" + color + "; margin:2px auto 0;'></div></div>")
             else:
-                mk += ("<div style='position:absolute; left:" + x + "%; top:50px; transform:translateX(-50%); text-align:center; width:86px;'>"
+                mk += ("<div style='position:absolute; left:" + x + "%; top:50px; transform:translateX(-50%); text-align:center; width:96px;'>"
                        "<div style='width:2px; height:14px; background:" + color + "; margin:0 auto 2px;'></div>"
-                       "<div style='color:" + TEXT + "; font-family:IBM Plex Mono,monospace; font-size:11px;'>" + "{:,.0f}".format(val) + "</div>"
-                       "<div style='color:" + color + "; font-size:9px; text-transform:uppercase; letter-spacing:0.5px;'>" + name + "</div></div>")
+                       "<div style='color:" + TEXT + "; font-family:IBM Plex Mono,monospace; font-size:14px; font-weight:600;'>" + "{:,.0f}".format(val) + "</div>"
+                       "<div style='color:" + color + "; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px;'>" + name + "</div></div>")
 
         lp = "{:.1f}".format(rpct(latest_price))
-        mk += ("<div style='position:absolute; left:" + lp + "%; top:30px; transform:translateX(-50%); text-align:center; z-index:3;'>"
-               "<div style='background:" + BLUE + "; color:white; font-family:IBM Plex Mono,monospace; font-size:11px; font-weight:600; padding:1px 6px; border-radius:4px;'>" + "{:,.1f}".format(latest_price) + "</div>"
-               "<div style='width:2px; height:16px; background:white; margin:1px auto 0;'></div></div>")
+        mk += ("<div style='position:absolute; left:" + lp + "%; top:26px; transform:translateX(-50%); text-align:center; z-index:3;'>"
+               "<div style='background:" + BLUE + "; color:white; font-family:IBM Plex Mono,monospace; font-size:14px; font-weight:600; padding:2px 8px; border-radius:4px; white-space:nowrap;'>" + "{:,.1f}".format(latest_price) + "</div>"
+               "<div style='width:2px; height:18px; background:white; margin:1px auto 0;'></div></div>")
 
         radar = ("<div class='ns-panel' style='padding:14px 40px 10px;'>"
                  "<div style='position:relative; height:104px;'>"
@@ -249,28 +249,54 @@ if page_selection == "Live Cockpit":
             fig.add_trace(go.Scatter(x=df_main.index, y=series, mode='lines', name=p + ma_type,
                                      line=dict(color=ma_colors[p], width=1.3)))
 
+    # --- Lock the y-axis to the price action so level zones cannot flatten the candles ---
+    p_hi, p_lo = float(df_main['High'].max()), float(df_main['Low'].min())
+    pad = max((p_hi - p_lo) * 0.10, expected_move_points * 0.35)
+    y_hi, y_lo = p_hi + pad, p_lo - pad
+
+    # Draw only the zones that are actually in view, clipped to the visible window
+    visible_zones = []
     for _, row in filtered_levels.iterrows():
         try:
             zone_type, bottom, top = row['Type'], float(row['Bottom']), float(row['Top'])
         except Exception:
             continue
-        is_sup = str(zone_type).strip().lower() == "support"
+        if bottom > top:
+            bottom, top = top, bottom
+        if top < y_lo or bottom > y_hi:
+            continue
+        visible_zones.append((str(zone_type).strip().lower() == "support", bottom, top))
+
+    # Stagger labels so stacked zones do not overprint each other
+    visible_zones.sort(key=lambda z: z[1])
+    last_label_y, x_slots, slot = None, [0.005, 0.13, 0.26], 0
+    for is_sup, bottom, top in visible_zones:
         fill_color = GREEN if is_sup else RED
-        label = ("Support " if is_sup else "Resistance ") + "{:,.0f}".format((bottom + top) / 2)
-        fig.add_hrect(y0=bottom, y1=top, line_width=1, line_color=fill_color, fillcolor=fill_color, opacity=0.14,
-                      annotation_text=label, annotation_position="top left",
-                      annotation_font=dict(color="white", size=11))
+        mid = (bottom + top) / 2.0
+        if last_label_y is not None and abs(mid - last_label_y) < (y_hi - y_lo) * 0.05:
+            slot = (slot + 1) % len(x_slots)
+        else:
+            slot = 0
+        last_label_y = mid
+        fig.add_hrect(y0=max(bottom, y_lo), y1=min(top, y_hi), line_width=1, line_color=fill_color,
+                      fillcolor=fill_color, opacity=0.11, layer="below")
+        fig.add_annotation(xref="paper", x=x_slots[slot], y=min(top, y_hi), yanchor="top", xanchor="left",
+                           text=("S " if is_sup else "R ") + "{:,.0f}".format(mid),
+                           showarrow=False, font=dict(color="white", size=12),
+                           bgcolor="rgba(13,17,23,0.75)", borderpad=2)
 
-    fig.add_hline(y=em_upper, line_dash="dash", line_color="#00BFFF", line_width=1.2, annotation_text="+1 SD",
-                  annotation_position="bottom left", annotation_font=dict(color="white"), annotation_bgcolor="#00BFFF")
-    fig.add_hline(y=em_lower, line_dash="dash", line_color="#00BFFF", line_width=1.2, annotation_text="-1 SD",
-                  annotation_position="top left", annotation_font=dict(color="white"), annotation_bgcolor="#00BFFF")
+    for y_val, tag in [(em_upper, "+1 SD"), (em_lower, "-1 SD")]:
+        fig.add_hline(y=y_val, line_dash="dash", line_color="#00BFFF", line_width=1.2)
+        fig.add_annotation(xref="paper", x=0.995, y=y_val, xanchor="right", yanchor="middle", text=tag,
+                           showarrow=False, font=dict(color="white", size=12), bgcolor="#00BFFF", borderpad=3)
 
-    fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=600,
-                      yaxis=dict(side="right"), paper_bgcolor=BG, plot_bgcolor="#10151f",
-                      margin=dict(l=10, r=10, t=30, b=10),
+    fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=620,
+                      yaxis=dict(side="right", range=[y_lo, y_hi], tickfont=dict(size=13)),
+                      xaxis=dict(tickfont=dict(size=13)),
+                      paper_bgcolor=BG, plot_bgcolor="#10151f",
+                      margin=dict(l=10, r=10, t=34, b=10),
                       legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
-                                  bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
+                                  bgcolor="rgba(0,0,0,0)", font=dict(size=13)))
     st.plotly_chart(fig, theme=None, use_container_width=True)
 
     # ---- Distance to Your Levels ladder ----
@@ -293,10 +319,10 @@ if page_selection == "Live Cockpit":
             border = "border:1px solid " + (BLUE if nearest else LINE) + ";"
             zone = "{:,.0f}".format(mid) if abs(top - bottom) < 1 else "{:,.0f} – {:,.0f}".format(bottom, top)
             return ("<div style='display:flex; align-items:center; background:" + PANEL2 + "; " + border +
-                    " border-radius:6px; padding:8px 12px; margin-bottom:6px;'>"
-                    "<span style='width:9px; height:9px; border-radius:50%; background:" + color + "; margin-right:10px;'></span>"
-                    "<span style='color:" + TEXT + "; font-size:13px;'>" + typ + " <span style='font-family:IBM Plex Mono,monospace;'>" + zone + "</span></span>"
-                    "<span style='margin-left:auto; font-family:IBM Plex Mono,monospace; font-size:13px; font-weight:600; color:" + (GREEN if dist >= 0 else RED) + ";'>"
+                    " border-radius:6px; padding:10px 14px; margin-bottom:7px;'>"
+                    "<span style='width:10px; height:10px; border-radius:50%; background:" + color + "; margin-right:11px;'></span>"
+                    "<span style='color:" + TEXT + "; font-size:15px;'>" + typ + " <span style='font-family:IBM Plex Mono,monospace; font-weight:600;'>" + zone + "</span></span>"
+                    "<span style='margin-left:auto; font-family:IBM Plex Mono,monospace; font-size:15px; font-weight:600; color:" + (GREEN if dist >= 0 else RED) + ";'>"
                     + "{:+.1f} pts".format(dist) + "</span></div>")
 
         col_a, col_b = st.columns(2)
