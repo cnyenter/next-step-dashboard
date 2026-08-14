@@ -16,7 +16,7 @@ st_autorefresh(interval=60000, key="data_refresh")
 # 2. SIDEBAR NAVIGATION ROUTER
 # ==========================================
 st.sidebar.title("🧭 Navigation")
-page_selection = st.sidebar.radio("Select View:", ["Live Cockpit", "Alpha Playbook"])
+page_selection = st.sidebar.radio("Select View:", ["Live Cockpit", "Alpha Playbook", "Swing Book"])
 st.sidebar.divider()
 
 # Database Connections (PASTE LINKS HERE)
@@ -24,6 +24,7 @@ SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EG
 MQ_ES_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=1464368299&single=true&output=csv"
 MQ_SPX_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=818488226&single=true&output=csv"
 PLAYBOOK_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=698367233&single=true&output=csv"
+SWING_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=74511324&single=true&output=csv"
 
 # ==========================================
 # PAGE 1: LIVE COCKPIT
@@ -93,7 +94,7 @@ if page_selection == "Live Cockpit":
         mq_df = pd.read_csv(active_mq_url, header=None)
         if not mq_df.empty:
             mq_paste = mq_df.to_string(header=False, index=False) 
-            for line in mq_paste.split('\n'):
+            for line in mq_paste.split(''):
                 if not line.strip(): continue
                 numbers = re.findall(r'[\d,]+\.?\d*', line)
                 if numbers:
@@ -263,3 +264,175 @@ elif page_selection == "Alpha Playbook":
             st.info("Analyzing market structure for new asymmetric setups. Check back before market open.")
     except Exception as e:
         st.info("Playbook data currently unavailable. Ensure the Google Sheet link is correct.")
+
+# ==========================================
+# PAGE 3: SWING BOOK
+# ==========================================
+elif page_selection == "Swing Book":
+
+    st.title("📒 Next Step Trading: Swing Book")
+    st.markdown("<p style='color: gray; font-size: 16px;'>Multi-day swing positions &middot; managed alongside the daily SPX / ES_F levels</p>", unsafe_allow_html=True)
+
+    # ---- Book rules (edit these to your parameters) ----
+    BOOK_OPENED = "Jul 2026"
+    RISK_PER_TRADE = "1–2%"
+    MAX_OPEN_POSITIONS = 6
+
+    GREEN, RED, MUTED, PANEL, LINE = "#26a69a", "#ef5350", "#8b98a8", "#151b26", "#233"
+
+    @st.cache_data(ttl=120)
+    def load_swing_book(url):
+        df = pd.read_csv(url)
+        df = df.dropna(subset=["Ticker"])
+        df["Ticker"] = df["Ticker"].astype(str).str.strip().str.upper()
+        df["Status"] = df["Status"].astype(str).str.strip().str.upper()
+        df["Side"] = df["Side"].astype(str).str.strip().str.title()
+        return df
+
+    @st.cache_data(ttl=60)
+    def get_live_prices(tickers):
+        prices = {}
+        for t in tickers:
+            try:
+                h = yf.Ticker(t).history(period="2d")
+                if not h.empty:
+                    prices[t] = float(h["Close"].iloc[-1])
+            except Exception:
+                pass
+        return prices
+
+    try:
+        book = load_swing_book(SWING_SHEET_URL)
+    except Exception:
+        st.info("Swing Book data unavailable. Check that SWING_SHEET_URL points to the published CSV of your SwingBook tab.")
+        st.stop()
+
+    open_df = book[book["Status"] == "OPEN"].copy()
+    closed_df = book[book["Status"] == "CLOSED"].copy()
+
+    # ---- Closed trade results ----
+    def closed_result(row):
+        try:
+            e, x = float(row["Entry"]), float(row["Exit_Price"])
+            return ((x - e) / e * 100.0) if row["Side"] == "Long" else ((e - x) / e * 100.0)
+        except Exception:
+            return None
+    if not closed_df.empty:
+        closed_df["Result %"] = closed_df.apply(closed_result, axis=1)
+        closed_df = closed_df.dropna(subset=["Result %"])
+
+    # ---- Scoreboard: rules until trades close, then live stats ----
+    def tile(label, value, sub, color="white"):
+        return (
+            "<div style='flex:1; min-width:150px; background:" + PANEL + "; padding:14px 16px; "
+            "border:1px solid " + LINE + "; border-radius:8px; margin:4px;'>"
+            "<div style='color:" + MUTED + "; font-size:11px; text-transform:uppercase; letter-spacing:1px;'>" + label + "</div>"
+            "<div style='color:" + color + "; font-size:22px; font-weight:bold; margin-top:4px;'>" + value + "</div>"
+            "<div style='color:" + MUTED + "; font-size:11px; margin-top:2px;'>" + sub + "</div></div>"
+        )
+
+    if closed_df.empty:
+        tiles = (
+            tile("Book Opened", BOOK_OPENED, "tracked from trade #1")
+            + tile("Risk Per Trade", RISK_PER_TRADE, "of allocated capital")
+            + tile("Max Open", str(MAX_OPEN_POSITIONS), "positions at a time")
+            + tile("Record", "0W — 0L", "every result logged, nothing hidden")
+        )
+    else:
+        wins = closed_df[closed_df["Result %"] > 0]
+        losses = closed_df[closed_df["Result %"] <= 0]
+        win_rate = len(wins) / len(closed_df) * 100.0
+        avg_w = wins["Result %"].mean() if not wins.empty else 0.0
+        avg_l = losses["Result %"].mean() if not losses.empty else 0.0
+        total = closed_df["Result %"].sum()
+        tiles = (
+            tile("Closed Trades", str(len(closed_df)), str(len(wins)) + "W — " + str(len(losses)) + "L")
+            + tile("Win Rate", "%.0f%%" % win_rate, "since " + BOOK_OPENED, GREEN if win_rate >= 50 else RED)
+            + tile("Avg Winner", "+%.1f%%" % avg_w, "vs %.1f%% avg loser" % avg_l, GREEN)
+            + tile("Sum of Results", "%+.1f%%" % total, "closed trades, unweighted", GREEN if total >= 0 else RED)
+        )
+    st.markdown("<div style='display:flex; flex-wrap:wrap;'>" + tiles + "</div>", unsafe_allow_html=True)
+    st.divider()
+
+    # ---- Open positions ----
+    st.markdown("### Open Positions")
+    if open_df.empty:
+        st.info("No open positions. New entries appear here the moment the sheet updates.")
+    else:
+        live = get_live_prices(list(open_df["Ticker"].unique()))
+
+        for _, row in open_df.iterrows():
+            tkr, side = row["Ticker"], row["Side"]
+            entry, stop = float(row["Entry"]), float(row["Stop"])
+            targets = [float(row[t]) for t in ["T1", "T2", "T3"] if t in row and pd.notna(row[t]) and str(row[t]).strip() != ""]
+            cur = live.get(tkr)
+            sector = str(row.get("Sector", "")).strip()
+            opened = str(row.get("Date_Opened", "")).strip()
+            thesis = str(row.get("Thesis", "")).strip()
+
+            is_long = side == "Long"
+            side_color = GREEN if is_long else RED
+
+            if cur is not None:
+                pnl = (cur - entry) / entry * 100.0 if is_long else (entry - cur) / entry * 100.0
+                pnl_color = GREEN if pnl >= 0 else RED
+                pnl_html = "<span style='margin-left:auto; font-weight:bold; font-size:16px; color:" + pnl_color + ";'>%+.1f%%</span>" % pnl
+            else:
+                pnl, pnl_color = None, MUTED
+                pnl_html = "<span style='margin-left:auto; color:" + MUTED + "; font-size:12px;'>live price unavailable</span>"
+
+            # Ladder geometry: 0% = stop, 100% = final target
+            ladder_html = ""
+            if targets:
+                last_t = targets[-1]
+                span = (last_t - stop) if is_long else (stop - last_t)
+                if span and span > 0:
+                    def pct(p):
+                        raw = ((p - stop) / span * 100.0) if is_long else ((stop - p) / span * 100.0)
+                        return max(0.0, min(100.0, raw))
+                    def mark(p, label, color, lbl_style=""):
+                        return ("<div style='position:absolute; left:" + "%.1f" % pct(p) + "%; top:0; transform:translateX(-50%); text-align:center; width:70px;'>"
+                                "<div style='color:" + color + "; font-size:9px; text-transform:uppercase;'>" + label + "</div>"
+                                "<div style='width:2px; height:12px; background:" + color + "; margin:2px auto;'></div>"
+                                "<div style='color:white; font-size:11px; " + lbl_style + "'>" + ("%g" % p) + "</div></div>")
+                    marks = mark(stop, "Stop", RED) + mark(entry, "Entry", "#cccccc")
+                    for i, t in enumerate(targets):
+                        marks += mark(t, "T" + str(i + 1), GREEN)
+                    fill = ""
+                    if cur is not None:
+                        marks += mark(cur, "Live", pnl_color, "background:#2962ff; border-radius:3px; padding:0 4px; display:inline-block;")
+                        a, b = sorted([pct(entry), pct(cur)])
+                        fill = "<div style='position:absolute; top:32px; left:" + "%.1f" % a + "%; width:" + "%.1f" % (b - a) + "%; height:4px; background:" + pnl_color + "; border-radius:2px;'></div>"
+                    ladder_html = ("<div style='position:relative; height:58px; margin:14px 30px 0;'>"
+                                   "<div style='position:absolute; top:32px; left:0; right:0; height:4px; background:#222a38; border-radius:2px;'></div>"
+                                   + fill + marks + "</div>")
+
+            chips = "<span style='border:1px solid " + side_color + "; color:" + side_color + "; font-size:10px; padding:2px 8px; border-radius:4px; text-transform:uppercase; margin-right:6px;'>" + side + "</span>"
+            if sector:
+                chips += "<span style='border:1px solid #444; color:" + MUTED + "; font-size:10px; padding:2px 8px; border-radius:4px; margin-right:6px;'>" + sector + "</span>"
+            if opened:
+                chips += "<span style='border:1px solid #444; color:" + MUTED + "; font-size:10px; padding:2px 8px; border-radius:4px;'>Opened " + opened + "</span>"
+
+            card = ("<div style='background:" + PANEL + "; border:1px solid " + LINE + "; border-radius:8px; padding:16px 18px; margin-bottom:14px;'>"
+                    "<div style='display:flex; align-items:center; flex-wrap:wrap; gap:8px;'>"
+                    "<span style='font-size:20px; font-weight:bold; letter-spacing:0.5px;'>" + tkr + "</span>" + chips + pnl_html + "</div>"
+                    "<div style='color:" + MUTED + "; font-size:13px; margin-top:6px;'>" + thesis + "</div>"
+                    + ladder_html + "</div>")
+            st.markdown(card, unsafe_allow_html=True)
+
+    st.divider()
+
+    # ---- Closed trades ----
+    st.markdown("### Closed Trades")
+    if closed_df.empty:
+        st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13px;'>"
+                    "The book is brand new — no closed trades yet. Every exit is logged here as it happens, winners and losers alike, starting with trade #1. "
+                    "The scoreboard above switches to live performance stats once the first trades close.</div>", unsafe_allow_html=True)
+    else:
+        show = closed_df[["Ticker", "Side", "Date_Opened", "Entry", "Date_Closed", "Exit_Price", "Result %"]].copy()
+        show = show.sort_values("Date_Closed", ascending=False)
+        show["Result %"] = show["Result %"].map(lambda v: "%+.1f%%" % v)
+        st.dataframe(show, use_container_width=True, hide_index=True)
+
+    st.markdown("<p style='color:" + MUTED + "; font-size:11px; text-align:center; margin-top:18px;'>"
+                "This is not trading advice. This is purely for information/education. Positions reflect the author's own tracking portfolio.</p>", unsafe_allow_html=True)
