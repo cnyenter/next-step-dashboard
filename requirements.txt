@@ -3,3 +3,4 @@ streamlit-autorefresh
 pandas
 yfinance
 plotly
+tzdata
