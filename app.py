@@ -46,6 +46,38 @@ def tile(label, value, sub="", color=TEXT):
             "<div class='ns-value' style='color:" + color + ";'>" + value + "</div>"
             "<div class='ns-sub'>" + sub + "</div></div>")
 
+# Dates may be entered in more than one format across rows, so parse each value
+# individually instead of letting pandas infer one format for the whole column.
+_DATE_FORMATS = ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%Y/%m/%d",
+                 "%m-%d-%y", "%m/%d/%y", "%d-%b-%Y", "%b %d, %Y", "%d %b %Y")
+
+def parse_date_col(s):
+    out = []
+    for v in s:
+        d = pd.NaT
+        txt = "" if pd.isna(v) else str(v).strip()
+        if txt:
+            for fmt in _DATE_FORMATS:
+                try:
+                    d = pd.to_datetime(txt, format=fmt)
+                    break
+                except (ValueError, TypeError):
+                    continue
+            if pd.isna(d):
+                try:
+                    d = pd.to_datetime(txt, errors="coerce")
+                except Exception:
+                    d = pd.NaT
+        out.append(d)
+    return pd.Series(out, index=s.index)
+
+def level_name(is_sup, bottom, top, label=""):
+    txt = ("S " if is_sup else "R ")
+    txt += "{:,.0f}".format(bottom) if abs(top - bottom) < 0.5 else "{:,.0f} – {:,.0f}".format(bottom, top)
+    if label:
+        txt += " (" + label + ")"
+    return txt
+
 # ==========================================
 # 2. SIDEBAR NAVIGATION ROUTER
 # ==========================================
@@ -160,14 +192,23 @@ if page_selection == "Live Cockpit":
 
     # ---- Published levels from sheet ----
     levels_note = ""
+    levels_asof = None
     try:
         levels_df = pd.read_csv(SHEET_URL)
-        filtered_levels = levels_df[levels_df['Ticker'] == active_ticker]
+        filtered_levels = levels_df[levels_df['Ticker'] == active_ticker].copy()
+        # With a Date column present, show only the latest published set (not the whole archive)
+        if "Date" in filtered_levels.columns and not filtered_levels.empty:
+            filtered_levels["_dt"] = parse_date_col(filtered_levels["Date"])
+            if filtered_levels["_dt"].notna().any():
+                levels_asof = filtered_levels["_dt"].max()
+                filtered_levels = filtered_levels[filtered_levels["_dt"] == levels_asof]
     except Exception:
         filtered_levels = pd.DataFrame()
         levels_note = "Levels sheet unavailable — zones and ladder hidden."
     if levels_note:
         st.caption(levels_note)
+    elif levels_asof is not None:
+        st.caption("Levels as published " + levels_asof.strftime("%b %d, %Y"))
 
     # ---- MenthorQ dealer levels ----
     active_mq_url = MQ_ES_SHEET_URL if active_ticker == "ES=F" else MQ_SPX_SHEET_URL
@@ -293,13 +334,14 @@ if page_selection == "Live Cockpit":
             continue
         if bottom > top:
             bottom, top = top, bottom
-        all_zones.append((str(zone_type).strip().lower() == "support", bottom, top))
+        lbl = str(row.get("Label", "") or "").strip()
+        all_zones.append((str(zone_type).strip().lower() == "support", bottom, top, lbl))
 
     # Stagger labels so stacked zones do not overprint each other
     all_zones.sort(key=lambda z: z[1])
     last_label_y, x_slots, slot = None, [0.005, 0.17, 0.34], 0
     full_span = max(y_hi - y_lo, 1.0)
-    for is_sup, bottom, top in all_zones:
+    for is_sup, bottom, top, lbl in all_zones:
         fill_color = GREEN if is_sup else RED
         mid = (bottom + top) / 2.0
         if last_label_y is not None and abs(mid - last_label_y) < full_span * 0.05:
@@ -307,11 +349,7 @@ if page_selection == "Live Cockpit":
         else:
             slot = 0
         last_label_y = mid
-        zone_label = ("S " if is_sup else "R ")
-        if abs(top - bottom) < 0.5:
-            zone_label += "{:,.0f}".format(bottom)
-        else:
-            zone_label += "{:,.0f} – {:,.0f}".format(bottom, top)
+        zone_label = level_name(is_sup, bottom, top, lbl)
         fig.add_hrect(y0=bottom, y1=top, line_width=1, line_color=fill_color,
                       fillcolor=fill_color, opacity=0.16, layer="below")
         fig.add_annotation(xref="paper", x=x_slots[slot], y=top, yanchor="top", xanchor="left",
@@ -346,17 +384,19 @@ if page_selection == "Live Cockpit":
         for _, row in filtered_levels.iterrows():
             try:
                 mid = (float(row['Bottom']) + float(row['Top'])) / 2.0
-                rows.append((str(row['Type']).strip().title(), float(row['Bottom']), float(row['Top']), mid))
+                rows.append((str(row['Type']).strip().title(), float(row['Bottom']), float(row['Top']), mid,
+                             str(row.get("Label", "") or "").strip()))
             except Exception:
                 continue
         above = sorted([r for r in rows if r[3] >= latest_price], key=lambda r: r[3])[:5]
         below = sorted([r for r in rows if r[3] < latest_price], key=lambda r: -r[3])[:5]
 
         def ladder_row(r, nearest):
-            typ, bottom, top, mid = r
+            typ, bottom, top, mid, lbl = r
             color = GREEN if typ == "Support" else RED
             border = "border:1px solid " + (BLUE if nearest else LINE) + ";"
             zone = "{:,.0f}".format(mid) if abs(top - bottom) < 1 else "{:,.0f} – {:,.0f}".format(bottom, top)
+            tag = ("<span style='color:" + MUTED + "; font-size:12px; margin-left:7px;'>" + lbl + "</span>") if lbl else ""
             in_zone = bottom <= latest_price <= top
             if in_zone:
                 dist_html = ("<span style='margin-left:auto; font-family:IBM Plex Mono,monospace; font-size:14px; font-weight:600; "
@@ -370,7 +410,7 @@ if page_selection == "Live Cockpit":
             return ("<div style='display:flex; align-items:center; background:" + PANEL2 + "; " + border +
                     " border-radius:6px; padding:10px 14px; margin-bottom:7px;'>"
                     "<span style='width:10px; height:10px; border-radius:50%; background:" + color + "; margin-right:11px;'></span>"
-                    "<span style='color:" + TEXT + "; font-size:15px;'>" + typ + " <span style='font-family:IBM Plex Mono,monospace; font-weight:600;'>" + zone + "</span></span>"
+                    "<span style='color:" + TEXT + "; font-size:15px;'>" + typ + " <span style='font-family:IBM Plex Mono,monospace; font-weight:600;'>" + zone + "</span>" + tag + "</span>"
                     + dist_html + "</div>")
 
         col_a, col_b = st.columns(2)
@@ -526,31 +566,6 @@ elif page_selection == "Swing Book":
             sub = hist  # trade dated before available history; fall back to first bar
             return float(sub["Close"].iloc[0])
         return float(sub["Close"].iloc[-1])
-
-    # Dates may be entered in more than one format across rows, so parse each value
-    # individually instead of letting pandas infer one format for the whole column.
-    _DATE_FORMATS = ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%Y/%m/%d",
-                     "%m-%d-%y", "%m/%d/%y", "%d-%b-%Y", "%b %d, %Y", "%d %b %Y")
-
-    def parse_date_col(s):
-        out = []
-        for v in s:
-            d = pd.NaT
-            txt = "" if pd.isna(v) else str(v).strip()
-            if txt:
-                for fmt in _DATE_FORMATS:
-                    try:
-                        d = pd.to_datetime(txt, format=fmt)
-                        break
-                    except (ValueError, TypeError):
-                        continue
-                if pd.isna(d):
-                    try:
-                        d = pd.to_datetime(txt, errors="coerce")
-                    except Exception:
-                        d = pd.NaT
-            out.append(d)
-        return pd.Series(out, index=s.index)
 
     for col in ["Date_Opened", "Date_Closed"]:
         if col in book.columns:
@@ -869,40 +884,65 @@ elif page_selection == "Weekly Recap":
     try:
         lv = pd.read_csv(SHEET_URL)
         lv = lv[lv["Ticker"] == "^SPX"] if "^SPX" in set(lv["Ticker"]) else lv[lv["Ticker"] == "ES=F"]
+        if "Date" in lv.columns:
+            lv["_dt"] = parse_date_col(lv["Date"]).dt.normalize()
     except Exception:
         lv = pd.DataFrame()
 
     card_html, tested, held = "", 0, 0
+    ma_tested = ma_held = st_tested = st_held = 0
+    has_dates = (not lv.empty) and ("_dt" in lv.columns) and lv["_dt"].notna().any()
+
     if not lv.empty:
-        zones = []
+        # Union of zones published during the week; each gets one row on the card
+        zone_days = {}
         for _, r in lv.iterrows():
             try:
                 b, t = float(r["Bottom"]), float(r["Top"])
             except Exception:
                 continue
-            if b > t: b, t = t, b
-            zones.append((str(r["Type"]).strip().lower() == "support", b, t))
-        zones.sort(key=lambda z: -z[2])
+            if b > t:
+                b, t = t, b
+            key = (str(r["Type"]).strip().lower() == "support", b, t, str(r.get("Label", "") or "").strip())
+            zone_days.setdefault(key, set())
+            if has_dates and pd.notna(r.get("_dt")):
+                zone_days[key].add(r["_dt"].date())
 
+        keys = sorted(zone_days.keys(), key=lambda z: -z[2])
         day_labels = [d.strftime("%a") for d in daily.index]
-        head = "<tr><th style='text-align:left; width:150px;'>Published Level</th>"
+        head = "<tr><th style='text-align:left; width:186px;'>Published Level</th>"
         for dl in day_labels:
             head += "<th>" + dl + "</th>"
         head += "</tr>"
 
-        body = ""
         style_map = {"hold": ("rgba(38,166,154,.22)", GREEN, "HELD"), "break": ("rgba(239,83,80,.22)", RED, "BRK"),
-                     "both": ("rgba(240,185,11,.20)", AMBER, "B/R"), "none": ("#141a24", "#3d4757", "—")}
-        for is_sup, b, t in zones:
+                     "both": ("rgba(240,185,11,.20)", AMBER, "B/R"), "none": ("#141a24", "#3d4757", "\u2014"),
+                     "unpub": ("transparent", "#2b3444", "\u00b7")}
+        body = ""
+        for key in keys:
+            is_sup, b, t, lbl = key
+            is_ma = lbl.upper().endswith("MA")
             dot = GREEN if is_sup else RED
-            name = ("S " if is_sup else "R ") + ("{:,.0f}".format(b) if abs(t - b) < 0.5 else "{:,.0f} – {:,.0f}".format(b, t))
             row = ("<td class='lv'><span style='display:inline-block;width:8px;height:8px;border-radius:50%;background:"
-                   + dot + ";margin-right:7px;'></span>" + name + "</td>")
+                   + dot + ";margin-right:7px;'></span>" + level_name(is_sup, b, t, lbl) + "</td>")
             for _, d in daily.iterrows():
-                g = grade_level(is_sup, b, t, float(d["High"]), float(d["Low"]), float(d["Close"]))
-                if g != "none":
-                    tested += 1
-                    if g == "hold": held += 1
+                dt = d.name.date()
+                if has_dates and zone_days[key] and dt not in zone_days[key]:
+                    g = "unpub"   # this level was not on the board that morning
+                else:
+                    g = grade_level(is_sup, b, t, float(d["High"]), float(d["Low"]), float(d["Close"]))
+                    if g != "none":
+                        tested += 1
+                        if is_ma:
+                            ma_tested += 1
+                        else:
+                            st_tested += 1
+                        if g == "hold":
+                            held += 1
+                            if is_ma:
+                                ma_held += 1
+                            else:
+                                st_held += 1
                 bgc, fgc, txt = style_map[g]
                 row += ("<td><span style='display:block;height:26px;line-height:26px;border-radius:5px;background:" + bgc
                         + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:11.5px;font-weight:600;'>" + txt + "</span></td>")
@@ -926,6 +966,13 @@ elif page_selection == "Weekly Recap":
                     "Graded automatically: HELD = tested and respected · BRK = closed through · B/R = broke intraday, closed back</p>",
                     unsafe_allow_html=True)
         st.markdown("<div class='ns-panel'>" + card_html + "</div>", unsafe_allow_html=True)
+        if ma_tested and st_tested:
+            st.markdown("<div class='ns-panel' style='margin-top:8px; border-left:3px solid " + BLUE + ";'>"
+                        "<span style='font-size:13.5px; color:#cdd8e4;'><strong>Moving-average levels held "
+                        + "{:.0f}%".format(ma_held / ma_tested * 100) + "</strong> of the time they were tested ("
+                        + str(ma_held) + " of " + str(ma_tested) + "), versus <strong>"
+                        + "{:.0f}%".format(st_held / st_tested * 100) + "</strong> for structural levels ("
+                        + str(st_held) + " of " + str(st_tested) + ").</span></div>", unsafe_allow_html=True)
 
     # ---------- 2. Where the week was fought (time at price) ----------
     st.markdown("<div class='ns-section'>📊 Where The Week Was Fought</div>", unsafe_allow_html=True)
