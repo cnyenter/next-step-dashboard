@@ -50,7 +50,7 @@ def tile(label, value, sub="", color=TEXT):
 # 2. SIDEBAR NAVIGATION ROUTER
 # ==========================================
 st.sidebar.title("🧭 Navigation")
-page_selection = st.sidebar.radio("Select View:", ["Live Cockpit", "Swing Book"])
+page_selection = st.sidebar.radio("Select View:", ["Live Cockpit", "Swing Book", "Weekly Recap"])
 st.sidebar.divider()
 
 # Database Connections (PASTE LINKS HERE)
@@ -504,6 +504,86 @@ elif page_selection == "Swing Book":
         closed_df["Result %"] = closed_df.apply(closed_result, axis=1)
         closed_df = closed_df.dropna(subset=["Result %"])
 
+    # ---- SPY benchmark ----
+    @st.cache_data(ttl=900)
+    def get_spy_daily(start_str):
+        h = yf.Ticker("SPY").history(start=start_str)
+        if h.empty:
+            return None
+        h = h.copy()
+        try:
+            h.index = h.index.tz_localize(None)
+        except (TypeError, AttributeError):
+            pass
+        return h[["Close"]]
+
+    def spy_px_on(hist, ts):
+        """Closing price on the last SPY session at or before ts."""
+        if hist is None or ts is None or pd.isna(ts):
+            return None
+        sub = hist[hist.index <= ts]
+        if sub.empty:
+            sub = hist  # trade dated before available history; fall back to first bar
+            return float(sub["Close"].iloc[0])
+        return float(sub["Close"].iloc[-1])
+
+    # Dates may be entered in more than one format across rows, so parse each value
+    # individually instead of letting pandas infer one format for the whole column.
+    _DATE_FORMATS = ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%Y/%m/%d",
+                     "%m-%d-%y", "%m/%d/%y", "%d-%b-%Y", "%b %d, %Y", "%d %b %Y")
+
+    def parse_date_col(s):
+        out = []
+        for v in s:
+            d = pd.NaT
+            txt = "" if pd.isna(v) else str(v).strip()
+            if txt:
+                for fmt in _DATE_FORMATS:
+                    try:
+                        d = pd.to_datetime(txt, format=fmt)
+                        break
+                    except (ValueError, TypeError):
+                        continue
+                if pd.isna(d):
+                    try:
+                        d = pd.to_datetime(txt, errors="coerce")
+                    except Exception:
+                        d = pd.NaT
+            out.append(d)
+        return pd.Series(out, index=s.index)
+
+    for col in ["Date_Opened", "Date_Closed"]:
+        if col in book.columns:
+            book[col + "_dt"] = parse_date_col(book[col])
+    for _df in (open_df, closed_df):
+        for col in ["Date_Opened", "Date_Closed"]:
+            if col in _df.columns:
+                _df[col + "_dt"] = parse_date_col(_df[col])
+
+    inception_dt = book["Date_Opened_dt"].min() if "Date_Opened_dt" in book.columns else None
+    spy_hist = None
+    if inception_dt is not None and pd.notna(inception_dt):
+        try:
+            spy_hist = get_spy_daily((inception_dt - pd.Timedelta(days=7)).strftime("%Y-%m-%d"))
+        except Exception:
+            spy_hist = None
+
+    spy_since_inception = None
+    if spy_hist is not None and inception_dt is not None and pd.notna(inception_dt):
+        p0, p1 = spy_px_on(spy_hist, inception_dt), float(spy_hist["Close"].iloc[-1])
+        if p0:
+            spy_since_inception = (p1 / p0 - 1.0) * 100.0
+
+    if not closed_df.empty and spy_hist is not None:
+        def spy_over_trade(row):
+            p0 = spy_px_on(spy_hist, row.get("Date_Opened_dt"))
+            p1 = spy_px_on(spy_hist, row.get("Date_Closed_dt"))
+            if not p0 or not p1:
+                return None
+            return (p1 / p0 - 1.0) * 100.0
+        closed_df["SPY %"] = closed_df.apply(spy_over_trade, axis=1)
+        closed_df["vs SPY"] = closed_df["Result %"] - closed_df["SPY %"]
+
     # ---- Scoreboard: rules until trades close, then live stats ----
     def tile(label, value, sub, color="white"):
         return (
@@ -521,19 +601,36 @@ elif page_selection == "Swing Book":
             + tile("Max Open", str(MAX_OPEN_POSITIONS), "positions at a time")
             + tile("Record", "0W — 0L", "every result logged, nothing hidden")
         )
+        if spy_since_inception is not None:
+            tiles += tile("SPY Since Inception", "%+.1f%%" % spy_since_inception, "the benchmark to beat",
+                          GREEN if spy_since_inception >= 0 else RED)
     else:
         wins = closed_df[closed_df["Result %"] > 0]
         losses = closed_df[closed_df["Result %"] <= 0]
-        win_rate = len(wins) / len(closed_df) * 100.0
+        n = len(closed_df)
+        win_rate = len(wins) / n * 100.0
         avg_w = wins["Result %"].mean() if not wins.empty else 0.0
         avg_l = losses["Result %"].mean() if not losses.empty else 0.0
         total = closed_df["Result %"].sum()
-        tiles = (
-            tile("Closed Trades", str(len(closed_df)), str(len(wins)) + "W — " + str(len(losses)) + "L")
-            + tile("Win Rate", "%.0f%%" % win_rate, "since " + BOOK_OPENED, GREEN if win_rate >= 50 else RED)
-            + tile("Avg Winner", "+%.1f%%" % avg_w, "vs %.1f%% avg loser" % avg_l, GREEN)
-            + tile("Sum of Results", "%+.1f%%" % total, "closed trades, unweighted", GREEN if total >= 0 else RED)
-        )
+
+        tiles = tile("Closed Trades", str(n), str(len(wins)) + "W — " + str(len(losses)) + "L")
+        # A win rate off a handful of trades is noise, not a track record — say so.
+        if n < 5:
+            tiles += tile("Win Rate", "%.0f%%" % win_rate, "only %d trade%s — not meaningful yet" % (n, "" if n == 1 else "s"), MUTED)
+        else:
+            tiles += tile("Win Rate", "%.0f%%" % win_rate, "across %d closed trades" % n, GREEN if win_rate >= 50 else RED)
+        tiles += tile("Avg Winner", "+%.1f%%" % avg_w, "vs %.1f%% avg loser" % avg_l, GREEN)
+        tiles += tile("Sum of Results", "%+.1f%%" % total, "closed trades, unweighted", GREEN if total >= 0 else RED)
+
+        if spy_since_inception is not None:
+            tiles += tile("SPY Since Inception", "%+.1f%%" % spy_since_inception, "buy and hold, same window",
+                          GREEN if spy_since_inception >= 0 else RED)
+        if "vs SPY" in closed_df.columns and closed_df["vs SPY"].notna().any():
+            avg_alpha = closed_df["vs SPY"].mean()
+            beat = int((closed_df["vs SPY"] > 0).sum())
+            tiles += tile("Avg Trade vs SPY", "%+.1f%%" % avg_alpha,
+                          "beat SPY on %d of %d trades" % (beat, int(closed_df["vs SPY"].notna().sum())),
+                          GREEN if avg_alpha >= 0 else RED)
     st.markdown("<div style='display:flex; flex-wrap:wrap;'>" + tiles + "</div>", unsafe_allow_html=True)
     st.divider()
 
@@ -559,7 +656,18 @@ elif page_selection == "Swing Book":
             if cur is not None:
                 pnl = (cur - entry) / entry * 100.0 if is_long else (entry - cur) / entry * 100.0
                 pnl_color = GREEN if pnl >= 0 else RED
-                pnl_html = "<span style='margin-left:auto; font-weight:bold; font-size:16px; color:" + pnl_color + ";'>%+.1f%%</span>" % pnl
+                bench = ""
+                d0 = row.get("Date_Opened_dt")
+                if spy_hist is not None and pd.notna(d0):
+                    p0 = spy_px_on(spy_hist, d0)
+                    if p0:
+                        spy_r = (float(spy_hist["Close"].iloc[-1]) / p0 - 1.0) * 100.0
+                        diff = pnl - spy_r
+                        bench = ("<span style='color:" + MUTED + "; font-size:11px; font-weight:400; display:block; text-align:right;'>"
+                                 "SPY %+.1f%% &middot; %+.1f%% vs SPY</span>" % (spy_r, diff))
+                pnl_html = ("<span style='margin-left:auto; text-align:right;'>"
+                            "<span style='font-weight:bold; font-size:16px; color:" + pnl_color + ";'>%+.1f%%</span>" % pnl
+                            + bench + "</span>")
             else:
                 pnl, pnl_color = None, MUTED
                 pnl_html = "<span style='margin-left:auto; color:" + MUTED + "; font-size:12px;'>live price unavailable</span>"
@@ -612,10 +720,323 @@ elif page_selection == "Swing Book":
                     "The book is brand new — no closed trades yet. Every exit is logged here as it happens, winners and losers alike, starting with trade #1. "
                     "The scoreboard above switches to live performance stats once the first trades close.</div>", unsafe_allow_html=True)
     else:
-        show = closed_df[["Ticker", "Side", "Date_Opened", "Entry", "Date_Closed", "Exit_Price", "Result %"]].copy()
-        show = show.sort_values("Date_Closed", ascending=False)
-        show["Result %"] = show["Result %"].map(lambda v: "%+.1f%%" % v)
-        st.dataframe(show, use_container_width=True, hide_index=True)
+        cd = closed_df.sort_values("Date_Closed_dt", ascending=False, na_position="last")
+        has_spy = "vs SPY" in cd.columns and cd["vs SPY"].notna().any()
+
+        head = ("<tr>"
+                "<th style='text-align:left;'>Ticker</th><th style='text-align:left;'>Side</th>"
+                "<th style='text-align:right;'>Entry</th><th style='text-align:right;'>Exit</th>"
+                "<th style='text-align:left;'>Held</th><th style='text-align:right;'>Result</th>")
+        if has_spy:
+            head += "<th style='text-align:right;'>SPY</th><th style='text-align:right;'>vs SPY</th>"
+        head += "</tr>"
+
+        rows_html = ""
+        for _, r in cd.iterrows():
+            res = r["Result %"]
+            res_c = GREEN if res >= 0 else RED
+            d0, d1 = r.get("Date_Opened_dt"), r.get("Date_Closed_dt")
+            if pd.notna(d0) and pd.notna(d1):
+                held = "%s → %s" % (d0.strftime("%b %d"), d1.strftime("%b %d"))
+            else:
+                held = str(r.get("Date_Closed", ""))
+            cells = ("<td style='font-weight:700;'>" + str(r["Ticker"]) + "</td>"
+                     "<td style='color:" + MUTED + ";'>" + str(r["Side"]) + "</td>"
+                     "<td style='text-align:right;'>" + "{:,.2f}".format(float(r["Entry"])) + "</td>"
+                     "<td style='text-align:right;'>" + "{:,.2f}".format(float(r["Exit_Price"])) + "</td>"
+                     "<td style='color:" + MUTED + ";'>" + held + "</td>"
+                     "<td style='text-align:right; font-weight:600; color:" + res_c + ";'>" + "{:+.1f}%".format(res) + "</td>")
+            if has_spy:
+                sp, al = r.get("SPY %"), r.get("vs SPY")
+                if pd.notna(sp):
+                    al_c = GREEN if al >= 0 else RED
+                    cells += ("<td style='text-align:right; color:" + MUTED + ";'>" + "{:+.1f}%".format(sp) + "</td>"
+                              "<td style='text-align:right; font-weight:600; color:" + al_c + ";'>" + "{:+.1f}%".format(al) + "</td>")
+                else:
+                    cells += "<td style='text-align:right; color:" + MUTED + ";'>—</td><td style='text-align:right; color:" + MUTED + ";'>—</td>"
+            rows_html += "<tr>" + cells + "</tr>"
+
+        table = ("<style>"
+                 ".ns-tbl{width:100%; border-collapse:collapse; background:#151b26; border:1px solid #232c3d;"
+                 " border-radius:8px; overflow:hidden; font-size:14px; font-family:'IBM Plex Mono',monospace;}"
+                 ".ns-tbl th{font-family:'IBM Plex Sans',sans-serif; font-size:11.5px; text-transform:uppercase;"
+                 " letter-spacing:0.8px; color:#a8b6c6; padding:11px 14px; border-bottom:1px solid #232c3d; font-weight:600;}"
+                 ".ns-tbl td{padding:10px 14px; border-bottom:1px solid #1c2434; color:#e6edf3;}"
+                 ".ns-tbl tr:last-child td{border-bottom:none;}"
+                 "</style><table class='ns-tbl'>" + head + rows_html + "</table>")
+        st.markdown(table, unsafe_allow_html=True)
+        if has_spy:
+            st.caption("SPY shows what buying and holding SPY over the same dates would have returned. "
+                       "vs SPY is the difference — the value the trade added over simply owning the index.")
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11px; text-align:center; margin-top:18px;'>"
                 "This is not trading advice. This is purely for information/education. Positions reflect the author's own tracking portfolio.</p>", unsafe_allow_html=True)
+
+
+# ==========================================
+# PAGE 3: WEEKLY RECAP (auto-generated)
+# ==========================================
+elif page_selection == "Weekly Recap":
+
+    st.title("Next Step Trading: The Tape Report")
+    st.markdown("<p style='color:" + MUTED + "; font-size:15px;'>How the week traded — measured against the levels published before each open.</p>",
+                unsafe_allow_html=True)
+
+    # Sector ETFs and the movers watchlist are fixed, so this page needs no weekly upkeep.
+    SECTORS = {"XLK": "Technology", "XLF": "Financials", "XLE": "Energy", "XLV": "Health Care",
+               "XLY": "Cons. Disc.", "XLP": "Cons. Staples", "XLI": "Industrials",
+               "XLB": "Materials", "XLRE": "Real Estate", "XLU": "Utilities", "XLC": "Comm. Svcs"}
+    WATCHLIST = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "AMD", "NFLX",
+                 "JPM", "GS", "BAC", "V", "MA", "XOM", "CVX", "COP", "UNH", "LLY", "JNJ", "MRK",
+                 "CAT", "BA", "GE", "WMT", "COST", "HD", "PG", "KO", "DIS", "CRM", "ORCL", "PLTR"]
+
+    wk_col1, wk_col2 = st.columns([1, 3])
+    with wk_col1:
+        week_choice = st.radio("Week:", ["This week", "Last week"], horizontal=True)
+    offset = 0 if week_choice == "This week" else 1
+    try:
+        today = pd.Timestamp.now(tz="US/Eastern").normalize()
+    except Exception:
+        today = pd.Timestamp.now().normalize()   # tzdata unavailable; fall back to naive time
+    week_start = (today - pd.Timedelta(days=today.weekday())) - pd.Timedelta(weeks=offset)
+    week_end = week_start + pd.Timedelta(days=4)
+    st.caption("Week of " + week_start.strftime("%b %d") + " – " + week_end.strftime("%b %d, %Y")
+               + " · generated automatically from the published levels and market data")
+
+    @st.cache_data(ttl=900)
+    def get_week_bars(ticker, start_str, end_str):
+        h = yf.Ticker(ticker).history(start=start_str, end=end_str, interval="15m")
+        if h.empty:
+            return None
+        try:
+            h.index = h.index.tz_convert("US/Eastern")
+        except (TypeError, AttributeError):
+            pass
+        return h
+
+    @st.cache_data(ttl=900)
+    def get_week_change(tickers, start_str, end_str):
+        out = {}
+        for t in tickers:
+            try:
+                h = yf.Ticker(t).history(start=start_str, end=end_str, interval="1d")
+                if len(h) >= 1:
+                    out[t] = (float(h["Close"].iloc[-1]) / float(h["Open"].iloc[0]) - 1.0) * 100.0
+            except Exception:
+                pass
+        return out
+
+    s_str = week_start.strftime("%Y-%m-%d")
+    e_str = (week_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    bars = get_week_bars("^SPX", s_str, e_str)
+    nq_daily = get_week_change(["^NDX"], s_str, e_str)
+    spx_daily = get_week_change(["^SPX"], s_str, e_str)
+
+    if bars is None or bars.empty:
+        st.info("Market data for this week isn't available yet. Intraday history is limited to roughly the last 60 days.")
+        st.stop()
+
+    daily = bars.resample("1D").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
+    daily = daily[daily.index.dayofweek < 5]
+
+    # ---------- Verdict tiles ----------
+    wk_open, wk_close = float(daily["Open"].iloc[0]), float(daily["Close"].iloc[-1])
+    wk_pct = (wk_close / wk_open - 1.0) * 100.0
+    wk_range = float(daily["High"].max() - daily["Low"].min())
+
+    tiles = tile("SPX On The Week", "{:+.1f}%".format(wk_pct),
+                 "{:,.0f} → {:,.0f}".format(wk_open, wk_close), GREEN if wk_pct >= 0 else RED)
+    if "^NDX" in nq_daily:
+        nq_pct = nq_daily["^NDX"]
+        tiles += tile("NDX On The Week", "{:+.1f}%".format(nq_pct),
+                      "led" if abs(nq_pct) > abs(wk_pct) else "lagged", GREEN if nq_pct >= 0 else RED)
+    tiles += tile("Weekly Range", "{:,.0f} pts".format(wk_range),
+                  "{:,.0f} low → {:,.0f} high".format(float(daily["Low"].min()), float(daily["High"].max())))
+
+    # ---------- 1. Level Report Card (auto-graded) ----------
+    def grade_level(is_support, bottom, top, d_high, d_low, d_close):
+        if is_support:
+            if d_low > top: return "none"
+            if d_close < bottom: return "break"
+            if d_low < bottom and d_close >= bottom: return "both"
+            return "hold"
+        if d_high < bottom: return "none"
+        if d_close > top: return "break"
+        if d_high > top and d_close <= top: return "both"
+        return "hold"
+
+    try:
+        lv = pd.read_csv(SHEET_URL)
+        lv = lv[lv["Ticker"] == "^SPX"] if "^SPX" in set(lv["Ticker"]) else lv[lv["Ticker"] == "ES=F"]
+    except Exception:
+        lv = pd.DataFrame()
+
+    card_html, tested, held = "", 0, 0
+    if not lv.empty:
+        zones = []
+        for _, r in lv.iterrows():
+            try:
+                b, t = float(r["Bottom"]), float(r["Top"])
+            except Exception:
+                continue
+            if b > t: b, t = t, b
+            zones.append((str(r["Type"]).strip().lower() == "support", b, t))
+        zones.sort(key=lambda z: -z[2])
+
+        day_labels = [d.strftime("%a") for d in daily.index]
+        head = "<tr><th style='text-align:left; width:150px;'>Published Level</th>"
+        for dl in day_labels:
+            head += "<th>" + dl + "</th>"
+        head += "</tr>"
+
+        body = ""
+        style_map = {"hold": ("rgba(38,166,154,.22)", GREEN, "HELD"), "break": ("rgba(239,83,80,.22)", RED, "BRK"),
+                     "both": ("rgba(240,185,11,.20)", AMBER, "B/R"), "none": ("#141a24", "#3d4757", "—")}
+        for is_sup, b, t in zones:
+            dot = GREEN if is_sup else RED
+            name = ("S " if is_sup else "R ") + ("{:,.0f}".format(b) if abs(t - b) < 0.5 else "{:,.0f} – {:,.0f}".format(b, t))
+            row = ("<td class='lv'><span style='display:inline-block;width:8px;height:8px;border-radius:50%;background:"
+                   + dot + ";margin-right:7px;'></span>" + name + "</td>")
+            for _, d in daily.iterrows():
+                g = grade_level(is_sup, b, t, float(d["High"]), float(d["Low"]), float(d["Close"]))
+                if g != "none":
+                    tested += 1
+                    if g == "hold": held += 1
+                bgc, fgc, txt = style_map[g]
+                row += ("<td><span style='display:block;height:26px;line-height:26px;border-radius:5px;background:" + bgc
+                        + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:11.5px;font-weight:600;'>" + txt + "</span></td>")
+            body += "<tr>" + row + "</tr>"
+        card_html = ("<style>.rc{width:100%;border-collapse:collapse}"
+                     ".rc th{font-size:10.5px;text-transform:uppercase;letter-spacing:0.7px;color:" + MUTED
+                     + ";padding:0 0 9px;font-weight:600;text-align:center}"
+                     ".rc td{padding:4px 3px;text-align:center}"
+                     ".rc td.lv{text-align:left;font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:" + TEXT + "}"
+                     "</style><table class='rc'>" + head + body + "</table>")
+
+    if tested:
+        tiles += tile("Levels Tested", "%d of %d" % (held, tested), "held on the day they were tested",
+                      GREEN if held >= tested * 0.6 else AMBER)
+    st.markdown("<div class='ns-row'>" + tiles + "</div>", unsafe_allow_html=True)
+    st.divider()
+
+    if card_html:
+        st.markdown("<div class='ns-section'>📋 The Level Report Card</div>", unsafe_allow_html=True)
+        st.markdown("<p class='ns-sub' style='color:" + MUTED + "; font-size:12.5px; margin:-4px 0 10px 2px;'>"
+                    "Graded automatically: HELD = tested and respected · BRK = closed through · B/R = broke intraday, closed back</p>",
+                    unsafe_allow_html=True)
+        st.markdown("<div class='ns-panel'>" + card_html + "</div>", unsafe_allow_html=True)
+
+    # ---------- 2. Where the week was fought (time at price) ----------
+    st.markdown("<div class='ns-section'>📊 Where The Week Was Fought</div>", unsafe_allow_html=True)
+    st.markdown("<p style='color:" + MUTED + "; font-size:12.5px; margin:-4px 0 10px 2px;'>"
+                "Share of 15-minute closes by price bucket — the prices that actually mattered.</p>", unsafe_allow_html=True)
+    bucket = max(5, round(wk_range / 12.0 / 5.0) * 5)
+    closes = bars["Close"].dropna()
+    b_idx = (closes / bucket).round().astype(int)
+    counts = b_idx.value_counts().sort_index(ascending=False)
+    peak = int(counts.max()) if not counts.empty else 1
+    tap = ""
+    for k, c in counts.items():
+        px_lvl = k * bucket
+        w = c / peak * 100.0
+        tag = ""
+        if c == peak:
+            tag = ("<span style='margin-left:10px;font-family:IBM Plex Mono,monospace;font-size:10.5px;padding:0 6px;"
+                   "border-radius:3px;background:rgba(41,98,255,.2);color:#7aa2ff;'>most-traded price</span>")
+        tap += ("<div style='display:flex;align-items:center;height:19px;margin-bottom:3px;'>"
+                "<div style='width:66px;font-family:IBM Plex Mono,monospace;font-size:11.5px;color:" + MUTED
+                + ";text-align:right;padding-right:10px;'>" + "{:,.0f}".format(px_lvl) + "</div>"
+                "<div style='flex:1;display:flex;align-items:center;'>"
+                "<div style='height:15px;border-radius:3px;width:" + "{:.1f}".format(w)
+                + "%;background:linear-gradient(90deg,#2b6f6a,#26a69a);'></div>" + tag + "</div></div>")
+    st.markdown("<div class='ns-panel'>" + tap + "</div>", unsafe_allow_html=True)
+
+    # ---------- 3. When the money moved ----------
+    st.markdown("<div class='ns-section'>🕐 When The Money Moved</div>", unsafe_allow_html=True)
+    st.markdown("<p style='color:" + MUTED + "; font-size:12.5px; margin:-4px 0 10px 2px;'>"
+                "Net points by session block — where the week's trend actually got made.</p>", unsafe_allow_html=True)
+    blocks = [("Open → 11a", 9, 11), ("Midday", 11, 14), ("2p → Close", 14, 16)]
+    days = list(daily.index)
+    hm = "<div style='display:grid;grid-template-columns:104px repeat(" + str(len(days)) + ",1fr);gap:5px;'>"
+    hm += "<div></div>"
+    for d in days:
+        hm += ("<div style='font-size:10.5px;text-transform:uppercase;letter-spacing:0.7px;color:" + MUTED
+               + ";text-align:center;font-weight:600;'>" + d.strftime("%a") + "</div>")
+    cell_vals = {}
+    for bname, h0, h1 in blocks:
+        for d in days:
+            seg = bars[(bars.index.date == d.date()) & (bars.index.hour >= h0) & (bars.index.hour < h1)]
+            cell_vals[(bname, d)] = (float(seg["Close"].iloc[-1] - seg["Open"].iloc[0]) if len(seg) else None)
+    mx = max([abs(v) for v in cell_vals.values() if v is not None] or [1.0])
+    for bname, _, _ in blocks:
+        hm += ("<div style='font-size:11.5px;color:" + MUTED + ";display:flex;align-items:center;justify-content:flex-end;"
+               "padding-right:9px;'>" + bname + "</div>")
+        for d in days:
+            v = cell_vals[(bname, d)]
+            if v is None:
+                bgc, fgc, txt = "#141a24", "#3d4757", "—"
+            else:
+                inten = min(0.62, 0.10 + abs(v) / mx * 0.52)
+                bgc = ("rgba(38,166,154,%.2f)" % inten) if v >= 0 else ("rgba(239,83,80,%.2f)" % inten)
+                fgc = GREEN if v >= 0 else RED
+                txt = "{:+.0f}".format(v)
+            hm += ("<div style='height:38px;border-radius:6px;display:flex;align-items:center;justify-content:center;"
+                   "background:" + bgc + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:12.5px;font-weight:600;'>"
+                   + txt + "</div>")
+    hm += "</div>"
+    st.markdown("<div class='ns-panel'>" + hm + "</div>", unsafe_allow_html=True)
+
+    # ---------- 4. Sector rotation ----------
+    st.markdown("<div class='ns-section'>🔄 Sector Rotation</div>", unsafe_allow_html=True)
+    st.markdown("<p style='color:" + MUTED + "; font-size:12.5px; margin:-4px 0 10px 2px;'>"
+                "Weekly move by sector — where money came in and where it left.</p>", unsafe_allow_html=True)
+    sec_chg = get_week_change(list(SECTORS.keys()), s_str, e_str)
+    if sec_chg:
+        smax = max([abs(v) for v in sec_chg.values()] or [1.0])
+        rows = sorted(sec_chg.items(), key=lambda kv: -kv[1])
+        srow = ""
+        for tk, v in rows:
+            w = abs(v) / smax * 46.0
+            col = GREEN if v >= 0 else RED
+            bar = ("<div style='position:absolute;left:50%;width:" + "{:.1f}".format(w) + "%;height:15px;background:" + col + ";border-radius:0 3px 3px 0;'></div>"
+                   if v >= 0 else
+                   "<div style='position:absolute;right:50%;width:" + "{:.1f}".format(w) + "%;height:15px;background:" + col + ";border-radius:3px 0 0 3px;'></div>")
+            lab = ("<div style='position:absolute;left:calc(50% + " + "{:.1f}".format(w) + "% + 8px);font-family:IBM Plex Mono,monospace;font-size:11.5px;color:" + col + ";line-height:15px;'>" + "{:+.1f}%".format(v) + "</div>"
+                   if v >= 0 else
+                   "<div style='position:absolute;right:calc(50% + " + "{:.1f}".format(w) + "% + 8px);font-family:IBM Plex Mono,monospace;font-size:11.5px;color:" + col + ";line-height:15px;'>" + "{:+.1f}%".format(v) + "</div>")
+            srow += ("<div style='display:flex;align-items:center;height:23px;'>"
+                     "<div style='width:108px;font-size:12px;color:" + TEXT + ";'>" + SECTORS.get(tk, tk) + "</div>"
+                     "<div style='flex:1;position:relative;height:15px;'>"
+                     "<div style='position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:#2c3648;'></div>"
+                     + bar + lab + "</div></div>")
+        st.markdown("<div class='ns-panel'>" + srow + "</div>", unsafe_allow_html=True)
+
+    # ---------- 5. Leaders and laggards ----------
+    st.markdown("<div class='ns-section'>🏆 Leaders &amp; Laggards</div>", unsafe_allow_html=True)
+    st.markdown("<p style='color:" + MUTED + "; font-size:12.5px; margin:-4px 0 10px 2px;'>"
+                "Biggest movers on the week from the large-cap watchlist.</p>", unsafe_allow_html=True)
+    mv = get_week_change(WATCHLIST, s_str, e_str)
+    if mv:
+        ranked = sorted(mv.items(), key=lambda kv: -kv[1])
+        leaders, laggards = ranked[:6], ranked[-6:][::-1]
+
+        def mover_panel(title, items, color):
+            h = ("<div class='ns-panel'><div style='font-size:11.5px;text-transform:uppercase;letter-spacing:0.8px;color:"
+                 + MUTED + ";font-weight:600;margin-bottom:10px;'>" + title + "</div>")
+            for tk, v in items:
+                h += ("<div style='display:flex;align-items:center;background:" + PANEL2 + ";border:1px solid " + LINE
+                      + ";border-radius:6px;padding:9px 13px;margin-bottom:6px;'>"
+                      "<span style='font-family:Space Grotesk,sans-serif;font-weight:700;font-size:14px;'>" + tk + "</span>"
+                      "<span style='margin-left:auto;font-family:IBM Plex Mono,monospace;font-size:14px;font-weight:600;color:"
+                      + (GREEN if v >= 0 else RED) + ";'>" + "{:+.1f}%".format(v) + "</span></div>")
+            return h + "</div>"
+
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            st.markdown(mover_panel("Leaders", leaders, GREEN), unsafe_allow_html=True)
+        with mc2:
+            st.markdown(mover_panel("Laggards", laggards, RED), unsafe_allow_html=True)
+
+    st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
+                "This is not trading advice. This is purely for information/education.</p>", unsafe_allow_html=True)
