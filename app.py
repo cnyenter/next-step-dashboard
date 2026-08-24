@@ -71,6 +71,17 @@ def parse_date_col(s):
         out.append(d)
     return pd.Series(out, index=s.index)
 
+def clean_str(v):
+    """Blank for NaN/None; trimmed text otherwise. NaN is truthy, so `v or ""` is not safe."""
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(v).strip()
+
 def level_name(is_sup, bottom, top, label=""):
     txt = ("S " if is_sup else "R ")
     txt += "{:,.0f}".format(bottom) if abs(top - bottom) < 0.5 else "{:,.0f} – {:,.0f}".format(bottom, top)
@@ -334,7 +345,7 @@ if page_selection == "Live Cockpit":
             continue
         if bottom > top:
             bottom, top = top, bottom
-        lbl = str(row.get("Label", "") or "").strip()
+        lbl = clean_str(row.get("Label"))
         all_zones.append((str(zone_type).strip().lower() == "support", bottom, top, lbl))
 
     # Stagger labels so stacked zones do not overprint each other
@@ -385,7 +396,7 @@ if page_selection == "Live Cockpit":
             try:
                 mid = (float(row['Bottom']) + float(row['Top'])) / 2.0
                 rows.append((str(row['Type']).strip().title(), float(row['Bottom']), float(row['Top']), mid,
-                             str(row.get("Label", "") or "").strip()))
+                             clean_str(row.get("Label"))))
             except Exception:
                 continue
         above = sorted([r for r in rows if r[3] >= latest_price], key=lambda r: r[3])[:5]
@@ -903,14 +914,14 @@ elif page_selection == "Weekly Recap":
                 continue
             if b > t:
                 b, t = t, b
-            key = (str(r["Type"]).strip().lower() == "support", b, t, str(r.get("Label", "") or "").strip())
+            key = (str(r["Type"]).strip().lower() == "support", b, t, clean_str(r.get("Label")))
             zone_days.setdefault(key, set())
             if has_dates and pd.notna(r.get("_dt")):
                 zone_days[key].add(r["_dt"].date())
 
         keys = sorted(zone_days.keys(), key=lambda z: -z[2])
         day_labels = [d.strftime("%a") for d in daily.index]
-        head = "<tr><th style='text-align:left; width:186px;'>Published Level</th>"
+        head = "<tr><th style='text-align:left; width:230px;'>Published Level</th>"
         for dl in day_labels:
             head += "<th>" + dl + "</th>"
         head += "</tr>"
@@ -944,14 +955,15 @@ elif page_selection == "Weekly Recap":
                             else:
                                 st_held += 1
                 bgc, fgc, txt = style_map[g]
-                row += ("<td><span style='display:block;height:26px;line-height:26px;border-radius:5px;background:" + bgc
-                        + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:11.5px;font-weight:600;'>" + txt + "</span></td>")
+                row += ("<td><span style='display:block;height:32px;line-height:32px;border-radius:5px;background:" + bgc
+                        + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:14px;font-weight:600;'>" + txt + "</span></td>")
             body += "<tr>" + row + "</tr>"
         card_html = ("<style>.rc{width:100%;border-collapse:collapse}"
-                     ".rc th{font-size:10.5px;text-transform:uppercase;letter-spacing:0.7px;color:" + MUTED
-                     + ";padding:0 0 9px;font-weight:600;text-align:center}"
-                     ".rc td{padding:4px 3px;text-align:center}"
-                     ".rc td.lv{text-align:left;font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:" + TEXT + "}"
+                     ".rc th{font-size:12.5px;text-transform:uppercase;letter-spacing:0.7px;color:" + MUTED
+                     + ";padding:0 0 11px;font-weight:600;text-align:center}"
+                     ".rc td{padding:5px 4px;text-align:center}"
+                     ".rc td.lv{text-align:left;font-family:'IBM Plex Mono',monospace;font-size:15px;"
+                     "white-space:nowrap;color:" + TEXT + "}"
                      "</style><table class='rc'>" + head + body + "</table>")
 
     if tested:
@@ -962,7 +974,7 @@ elif page_selection == "Weekly Recap":
 
     if card_html:
         st.markdown("<div class='ns-section'>📋 The Level Report Card</div>", unsafe_allow_html=True)
-        st.markdown("<p class='ns-sub' style='color:" + MUTED + "; font-size:12.5px; margin:-4px 0 10px 2px;'>"
+        st.markdown("<p class='ns-sub' style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                     "Graded automatically: HELD = tested and respected · BRK = closed through · B/R = broke intraday, closed back</p>",
                     unsafe_allow_html=True)
         st.markdown("<div class='ns-panel'>" + card_html + "</div>", unsafe_allow_html=True)
@@ -976,7 +988,7 @@ elif page_selection == "Weekly Recap":
 
     # ---------- 2. Where the week was fought (time at price) ----------
     st.markdown("<div class='ns-section'>📊 Where The Week Was Fought</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:" + MUTED + "; font-size:12.5px; margin:-4px 0 10px 2px;'>"
+    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                 "Share of 15-minute closes by price bucket — the prices that actually mattered.</p>", unsafe_allow_html=True)
     bucket = max(5, round(wk_range / 12.0 / 5.0) * 5)
     closes = bars["Close"].dropna()
@@ -986,29 +998,29 @@ elif page_selection == "Weekly Recap":
     tap = ""
     for k, c in counts.items():
         px_lvl = k * bucket
-        w = c / peak * 100.0
+        w = c / peak * 84.0   # leave room so the tag never clips at the panel edge
         tag = ""
         if c == peak:
-            tag = ("<span style='margin-left:10px;font-family:IBM Plex Mono,monospace;font-size:10.5px;padding:0 6px;"
-                   "border-radius:3px;background:rgba(41,98,255,.2);color:#7aa2ff;'>most-traded price</span>")
-        tap += ("<div style='display:flex;align-items:center;height:19px;margin-bottom:3px;'>"
-                "<div style='width:66px;font-family:IBM Plex Mono,monospace;font-size:11.5px;color:" + MUTED
-                + ";text-align:right;padding-right:10px;'>" + "{:,.0f}".format(px_lvl) + "</div>"
-                "<div style='flex:1;display:flex;align-items:center;'>"
-                "<div style='height:15px;border-radius:3px;width:" + "{:.1f}".format(w)
+            tag = ("<span style='margin-left:10px;font-family:IBM Plex Mono,monospace;font-size:12.5px;padding:1px 8px;"
+                   "border-radius:3px;background:rgba(41,98,255,.2);color:#7aa2ff;white-space:nowrap;'>most-traded price</span>")
+        tap += ("<div style='display:flex;align-items:center;height:24px;margin-bottom:4px;'>"
+                "<div style='width:80px;font-family:IBM Plex Mono,monospace;font-size:14px;color:" + MUTED
+                + ";text-align:right;padding-right:12px;'>" + "{:,.0f}".format(px_lvl) + "</div>"
+                "<div style='flex:1;display:flex;align-items:center;min-width:0;'>"
+                "<div style='height:18px;border-radius:3px;flex:none;width:" + "{:.1f}".format(w)
                 + "%;background:linear-gradient(90deg,#2b6f6a,#26a69a);'></div>" + tag + "</div></div>")
     st.markdown("<div class='ns-panel'>" + tap + "</div>", unsafe_allow_html=True)
 
     # ---------- 3. When the money moved ----------
     st.markdown("<div class='ns-section'>🕐 When The Money Moved</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:" + MUTED + "; font-size:12.5px; margin:-4px 0 10px 2px;'>"
+    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                 "Net points by session block — where the week's trend actually got made.</p>", unsafe_allow_html=True)
     blocks = [("Open → 11a", 9, 11), ("Midday", 11, 14), ("2p → Close", 14, 16)]
     days = list(daily.index)
-    hm = "<div style='display:grid;grid-template-columns:104px repeat(" + str(len(days)) + ",1fr);gap:5px;'>"
+    hm = "<div style='display:grid;grid-template-columns:118px repeat(" + str(len(days)) + ",1fr);gap:6px;'>"
     hm += "<div></div>"
     for d in days:
-        hm += ("<div style='font-size:10.5px;text-transform:uppercase;letter-spacing:0.7px;color:" + MUTED
+        hm += ("<div style='font-size:12.5px;text-transform:uppercase;letter-spacing:0.7px;color:" + MUTED
                + ";text-align:center;font-weight:600;'>" + d.strftime("%a") + "</div>")
     cell_vals = {}
     for bname, h0, h1 in blocks:
@@ -1017,8 +1029,8 @@ elif page_selection == "Weekly Recap":
             cell_vals[(bname, d)] = (float(seg["Close"].iloc[-1] - seg["Open"].iloc[0]) if len(seg) else None)
     mx = max([abs(v) for v in cell_vals.values() if v is not None] or [1.0])
     for bname, _, _ in blocks:
-        hm += ("<div style='font-size:11.5px;color:" + MUTED + ";display:flex;align-items:center;justify-content:flex-end;"
-               "padding-right:9px;'>" + bname + "</div>")
+        hm += ("<div style='font-size:13.5px;color:" + MUTED + ";display:flex;align-items:center;justify-content:flex-end;"
+               "padding-right:10px;'>" + bname + "</div>")
         for d in days:
             v = cell_vals[(bname, d)]
             if v is None:
@@ -1028,15 +1040,15 @@ elif page_selection == "Weekly Recap":
                 bgc = ("rgba(38,166,154,%.2f)" % inten) if v >= 0 else ("rgba(239,83,80,%.2f)" % inten)
                 fgc = GREEN if v >= 0 else RED
                 txt = "{:+.0f}".format(v)
-            hm += ("<div style='height:38px;border-radius:6px;display:flex;align-items:center;justify-content:center;"
-                   "background:" + bgc + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:12.5px;font-weight:600;'>"
+            hm += ("<div style='height:44px;border-radius:6px;display:flex;align-items:center;justify-content:center;"
+                   "background:" + bgc + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:15px;font-weight:600;'>"
                    + txt + "</div>")
     hm += "</div>"
     st.markdown("<div class='ns-panel'>" + hm + "</div>", unsafe_allow_html=True)
 
     # ---------- 4. Sector rotation ----------
     st.markdown("<div class='ns-section'>🔄 Sector Rotation</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:" + MUTED + "; font-size:12.5px; margin:-4px 0 10px 2px;'>"
+    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                 "Weekly move by sector — where money came in and where it left.</p>", unsafe_allow_html=True)
     sec_chg = get_week_change(list(SECTORS.keys()), s_str, e_str)
     if sec_chg:
@@ -1049,11 +1061,11 @@ elif page_selection == "Weekly Recap":
             bar = ("<div style='position:absolute;left:50%;width:" + "{:.1f}".format(w) + "%;height:15px;background:" + col + ";border-radius:0 3px 3px 0;'></div>"
                    if v >= 0 else
                    "<div style='position:absolute;right:50%;width:" + "{:.1f}".format(w) + "%;height:15px;background:" + col + ";border-radius:3px 0 0 3px;'></div>")
-            lab = ("<div style='position:absolute;left:calc(50% + " + "{:.1f}".format(w) + "% + 8px);font-family:IBM Plex Mono,monospace;font-size:11.5px;color:" + col + ";line-height:15px;'>" + "{:+.1f}%".format(v) + "</div>"
+            lab = ("<div style='position:absolute;left:calc(50% + " + "{:.1f}".format(w) + "% + 8px);font-family:IBM Plex Mono,monospace;font-size:13.5px;color:" + col + ";line-height:15px;'>" + "{:+.1f}%".format(v) + "</div>"
                    if v >= 0 else
-                   "<div style='position:absolute;right:calc(50% + " + "{:.1f}".format(w) + "% + 8px);font-family:IBM Plex Mono,monospace;font-size:11.5px;color:" + col + ";line-height:15px;'>" + "{:+.1f}%".format(v) + "</div>")
-            srow += ("<div style='display:flex;align-items:center;height:23px;'>"
-                     "<div style='width:108px;font-size:12px;color:" + TEXT + ";'>" + SECTORS.get(tk, tk) + "</div>"
+                   "<div style='position:absolute;right:calc(50% + " + "{:.1f}".format(w) + "% + 8px);font-family:IBM Plex Mono,monospace;font-size:13.5px;color:" + col + ";line-height:15px;'>" + "{:+.1f}%".format(v) + "</div>")
+            srow += ("<div style='display:flex;align-items:center;height:27px;'>"
+                     "<div style='width:124px;font-size:14px;color:" + TEXT + ";'>" + SECTORS.get(tk, tk) + "</div>"
                      "<div style='flex:1;position:relative;height:15px;'>"
                      "<div style='position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:#2c3648;'></div>"
                      + bar + lab + "</div></div>")
@@ -1061,7 +1073,7 @@ elif page_selection == "Weekly Recap":
 
     # ---------- 5. Leaders and laggards ----------
     st.markdown("<div class='ns-section'>🏆 Leaders &amp; Laggards</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:" + MUTED + "; font-size:12.5px; margin:-4px 0 10px 2px;'>"
+    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                 "Biggest movers on the week from the large-cap watchlist.</p>", unsafe_allow_html=True)
     mv = get_week_change(WATCHLIST, s_str, e_str)
     if mv:
