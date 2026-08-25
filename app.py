@@ -555,10 +555,10 @@ elif page_selection == "Swing Book":
         closed_df["Result %"] = closed_df.apply(closed_result, axis=1)
         closed_df = closed_df.dropna(subset=["Result %"])
 
-    # ---- SPY benchmark ----
+    # ---- SPX benchmark ----
     @st.cache_data(ttl=900)
-    def get_spy_daily(start_str):
-        h = yf.Ticker("SPY").history(start=start_str)
+    def get_bench_daily(start_str):
+        h = yf.Ticker("^SPX").history(start=start_str)
         if h.empty:
             return None
         h = h.copy()
@@ -568,8 +568,8 @@ elif page_selection == "Swing Book":
             pass
         return h[["Close"]]
 
-    def spy_px_on(hist, ts):
-        """Closing price on the last SPY session at or before ts."""
+    def bench_px_on(hist, ts):
+        """Closing price on the last index session at or before ts."""
         if hist is None or ts is None or pd.isna(ts):
             return None
         sub = hist[hist.index <= ts]
@@ -587,28 +587,28 @@ elif page_selection == "Swing Book":
                 _df[col + "_dt"] = parse_date_col(_df[col])
 
     inception_dt = book["Date_Opened_dt"].min() if "Date_Opened_dt" in book.columns else None
-    spy_hist = None
+    bench_hist = None
     if inception_dt is not None and pd.notna(inception_dt):
         try:
-            spy_hist = get_spy_daily((inception_dt - pd.Timedelta(days=7)).strftime("%Y-%m-%d"))
+            bench_hist = get_bench_daily((inception_dt - pd.Timedelta(days=7)).strftime("%Y-%m-%d"))
         except Exception:
-            spy_hist = None
+            bench_hist = None
 
-    spy_since_inception = None
-    if spy_hist is not None and inception_dt is not None and pd.notna(inception_dt):
-        p0, p1 = spy_px_on(spy_hist, inception_dt), float(spy_hist["Close"].iloc[-1])
+    bench_since_inception = None
+    if bench_hist is not None and inception_dt is not None and pd.notna(inception_dt):
+        p0, p1 = bench_px_on(bench_hist, inception_dt), float(bench_hist["Close"].iloc[-1])
         if p0:
-            spy_since_inception = (p1 / p0 - 1.0) * 100.0
+            bench_since_inception = (p1 / p0 - 1.0) * 100.0
 
-    if not closed_df.empty and spy_hist is not None:
-        def spy_over_trade(row):
-            p0 = spy_px_on(spy_hist, row.get("Date_Opened_dt"))
-            p1 = spy_px_on(spy_hist, row.get("Date_Closed_dt"))
+    if not closed_df.empty and bench_hist is not None:
+        def bench_over_trade(row):
+            p0 = bench_px_on(bench_hist, row.get("Date_Opened_dt"))
+            p1 = bench_px_on(bench_hist, row.get("Date_Closed_dt"))
             if not p0 or not p1:
                 return None
             return (p1 / p0 - 1.0) * 100.0
-        closed_df["SPY %"] = closed_df.apply(spy_over_trade, axis=1)
-        closed_df["vs SPY"] = closed_df["Result %"] - closed_df["SPY %"]
+        closed_df["SPX %"] = closed_df.apply(bench_over_trade, axis=1)
+        closed_df["vs SPX"] = closed_df["Result %"] - closed_df["SPX %"]
 
     # ---- Scoreboard: rules until trades close, then live stats ----
     def tile(label, value, sub, color="white"):
@@ -627,9 +627,9 @@ elif page_selection == "Swing Book":
             + tile("Max Open", str(MAX_OPEN_POSITIONS), "positions at a time")
             + tile("Record", "0W — 0L", "every result logged, nothing hidden")
         )
-        if spy_since_inception is not None:
-            tiles += tile("SPY Since Inception", "%+.1f%%" % spy_since_inception, "the benchmark to beat",
-                          GREEN if spy_since_inception >= 0 else RED)
+        if bench_since_inception is not None:
+            tiles += tile("SPX Since Inception", "%+.1f%%" % bench_since_inception, "the benchmark to beat",
+                          GREEN if bench_since_inception >= 0 else RED)
     else:
         wins = closed_df[closed_df["Result %"] > 0]
         losses = closed_df[closed_df["Result %"] <= 0]
@@ -648,14 +648,14 @@ elif page_selection == "Swing Book":
         tiles += tile("Avg Winner", "+%.1f%%" % avg_w, "vs %.1f%% avg loser" % avg_l, GREEN)
         tiles += tile("Sum of Results", "%+.1f%%" % total, "closed trades, unweighted", GREEN if total >= 0 else RED)
 
-        if spy_since_inception is not None:
-            tiles += tile("SPY Since Inception", "%+.1f%%" % spy_since_inception, "buy and hold, same window",
-                          GREEN if spy_since_inception >= 0 else RED)
-        if "vs SPY" in closed_df.columns and closed_df["vs SPY"].notna().any():
-            avg_alpha = closed_df["vs SPY"].mean()
-            beat = int((closed_df["vs SPY"] > 0).sum())
-            tiles += tile("Avg Trade vs SPY", "%+.1f%%" % avg_alpha,
-                          "beat SPY on %d of %d trades" % (beat, int(closed_df["vs SPY"].notna().sum())),
+        if bench_since_inception is not None:
+            tiles += tile("SPX Since Inception", "%+.1f%%" % bench_since_inception, "buy and hold, same window",
+                          GREEN if bench_since_inception >= 0 else RED)
+        if "vs SPX" in closed_df.columns and closed_df["vs SPX"].notna().any():
+            avg_alpha = closed_df["vs SPX"].mean()
+            beat = int((closed_df["vs SPX"] > 0).sum())
+            tiles += tile("Avg Trade vs SPX", "%+.1f%%" % avg_alpha,
+                          "beat SPX on %d of %d trades" % (beat, int(closed_df["vs SPX"].notna().sum())),
                           GREEN if avg_alpha >= 0 else RED)
     st.markdown("<div style='display:flex; flex-wrap:wrap;'>" + tiles + "</div>", unsafe_allow_html=True)
     st.divider()
@@ -684,13 +684,13 @@ elif page_selection == "Swing Book":
                 pnl_color = GREEN if pnl >= 0 else RED
                 bench = ""
                 d0 = row.get("Date_Opened_dt")
-                if spy_hist is not None and pd.notna(d0):
-                    p0 = spy_px_on(spy_hist, d0)
+                if bench_hist is not None and pd.notna(d0):
+                    p0 = bench_px_on(bench_hist, d0)
                     if p0:
-                        spy_r = (float(spy_hist["Close"].iloc[-1]) / p0 - 1.0) * 100.0
-                        diff = pnl - spy_r
+                        bench_r = (float(bench_hist["Close"].iloc[-1]) / p0 - 1.0) * 100.0
+                        diff = pnl - bench_r
                         bench = ("<span style='color:" + MUTED + "; font-size:11px; font-weight:400; display:block; text-align:right;'>"
-                                 "SPY %+.1f%% &middot; %+.1f%% vs SPY</span>" % (spy_r, diff))
+                                 "SPX %+.1f%% &middot; %+.1f%% vs SPX</span>" % (bench_r, diff))
                 pnl_html = ("<span style='margin-left:auto; text-align:right;'>"
                             "<span style='font-weight:bold; font-size:16px; color:" + pnl_color + ";'>%+.1f%%</span>" % pnl
                             + bench + "</span>")
@@ -747,14 +747,14 @@ elif page_selection == "Swing Book":
                     "The scoreboard above switches to live performance stats once the first trades close.</div>", unsafe_allow_html=True)
     else:
         cd = closed_df.sort_values("Date_Closed_dt", ascending=False, na_position="last")
-        has_spy = "vs SPY" in cd.columns and cd["vs SPY"].notna().any()
+        has_spy = "vs SPX" in cd.columns and cd["vs SPX"].notna().any()
 
         head = ("<tr>"
                 "<th style='text-align:left;'>Ticker</th><th style='text-align:left;'>Side</th>"
                 "<th style='text-align:right;'>Entry</th><th style='text-align:right;'>Exit</th>"
                 "<th style='text-align:left;'>Held</th><th style='text-align:right;'>Result</th>")
         if has_spy:
-            head += "<th style='text-align:right;'>SPY</th><th style='text-align:right;'>vs SPY</th>"
+            head += "<th style='text-align:right;'>SPX</th><th style='text-align:right;'>vs SPX</th>"
         head += "</tr>"
 
         rows_html = ""
@@ -773,7 +773,7 @@ elif page_selection == "Swing Book":
                      "<td style='color:" + MUTED + ";'>" + held + "</td>"
                      "<td style='text-align:right; font-weight:600; color:" + res_c + ";'>" + "{:+.1f}%".format(res) + "</td>")
             if has_spy:
-                sp, al = r.get("SPY %"), r.get("vs SPY")
+                sp, al = r.get("SPX %"), r.get("vs SPX")
                 if pd.notna(sp):
                     al_c = GREEN if al >= 0 else RED
                     cells += ("<td style='text-align:right; color:" + MUTED + ";'>" + "{:+.1f}%".format(sp) + "</td>"
@@ -792,8 +792,101 @@ elif page_selection == "Swing Book":
                  "</style><table class='ns-tbl'>" + head + rows_html + "</table>")
         st.markdown(table, unsafe_allow_html=True)
         if has_spy:
-            st.caption("SPY shows what buying and holding SPY over the same dates would have returned. "
-                       "vs SPY is the difference — the value the trade added over simply owning the index.")
+            st.caption("SPX shows what the index did over the same dates. "
+                       "vs SPX is the difference — the value the trade added over simply owning the index.")
+
+    # ---- Monthly performance vs SPX ----
+    st.divider()
+    st.markdown("<div class='ns-section'>📈 Performance vs SPX</div>", unsafe_allow_html=True)
+
+    if closed_df.empty or closed_df["Date_Closed_dt"].notna().sum() == 0:
+        st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13.5px;'>"
+                    "Monthly performance against SPX appears here once the first trades close.</div>", unsafe_allow_html=True)
+    else:
+        default_w = 100.0 / float(MAX_OPEN_POSITIONS)
+        cd = closed_df.dropna(subset=["Date_Closed_dt"]).copy()
+        cd["Month"] = cd["Date_Closed_dt"].dt.to_period("M")
+        if "Weight_Pct" in cd.columns:
+            w = pd.to_numeric(cd["Weight_Pct"], errors="coerce").fillna(default_w)
+        else:
+            w = pd.Series(default_w, index=cd.index)
+        cd["Contribution"] = cd["Result %"] * (w / 100.0)
+        book_monthly = cd.groupby("Month")["Contribution"].sum()
+
+        idx_monthly = pd.Series(dtype=float)
+        if bench_hist is not None and not bench_hist.empty:
+            m_close = bench_hist["Close"].resample("ME").last()
+            m_close.index = m_close.index.to_period("M")
+            idx_monthly = (m_close.pct_change() * 100.0).dropna()
+            first_m = m_close.index.min()
+            if inception_dt is not None and pd.notna(inception_dt):
+                p0 = bench_px_on(bench_hist, inception_dt)
+                if p0 and first_m in m_close.index:
+                    idx_monthly.loc[first_m] = (float(m_close.loc[first_m]) / p0 - 1.0) * 100.0
+            idx_monthly = idx_monthly.sort_index()
+
+        months = sorted(set(book_monthly.index) | set(idx_monthly.index))
+        if months:
+            labels = [str(m) for m in months]
+            book_vals = [float(book_monthly.get(m, 0.0)) for m in months]
+            idx_vals = [float(idx_monthly.get(m, 0.0)) for m in months]
+            book_cum, idx_cum, be, ie = [], [], 1.0, 1.0
+            for b, i in zip(book_vals, idx_vals):
+                be *= (1 + b / 100.0); ie *= (1 + i / 100.0)
+                book_cum.append((be - 1) * 100.0); idx_cum.append((ie - 1) * 100.0)
+
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                f1 = go.Figure()
+                f1.add_trace(go.Bar(x=labels, y=idx_vals, name="SPX", marker_color="#7f8c9b"))
+                f1.add_trace(go.Bar(x=labels, y=book_vals, name="Swing Book", marker_color=GREEN))
+                f1.update_layout(title=dict(text="Month by month", font=dict(size=15, color="white")),
+                                 barmode="group", template="plotly_dark", height=330,
+                                 paper_bgcolor=BG, plot_bgcolor="#10151f",
+                                 margin=dict(l=10, r=10, t=44, b=10),
+                                 yaxis=dict(ticksuffix="%", tickfont=dict(size=12)),
+                                 xaxis=dict(tickfont=dict(size=12)),
+                                 legend=dict(orientation="h", y=1.0, x=0, bgcolor="rgba(0,0,0,0)", font=dict(size=12)))
+                st.plotly_chart(f1, theme=None, use_container_width=True)
+            with pc2:
+                f2 = go.Figure()
+                f2.add_trace(go.Scatter(x=labels, y=idx_cum, name="SPX", mode="lines",
+                                        line=dict(color="#7f8c9b", width=2)))
+                f2.add_trace(go.Scatter(x=labels, y=book_cum, name="Swing Book", mode="lines",
+                                        line=dict(color=GREEN, width=2.6)))
+                f2.update_layout(title=dict(text="Cumulative", font=dict(size=15, color="white")),
+                                 template="plotly_dark", height=330,
+                                 paper_bgcolor=BG, plot_bgcolor="#10151f",
+                                 margin=dict(l=10, r=10, t=44, b=10),
+                                 yaxis=dict(ticksuffix="%", tickfont=dict(size=12)),
+                                 xaxis=dict(tickfont=dict(size=12)),
+                                 legend=dict(orientation="h", y=1.0, x=0, bgcolor="rgba(0,0,0,0)", font=dict(size=12)))
+                st.plotly_chart(f2, theme=None, use_container_width=True)
+
+            rows_html = ""
+            for lab, b, i, bc, ic in zip(labels, book_vals, idx_vals, book_cum, idx_cum):
+                rows_html += ("<tr><td>" + lab + "</td>"
+                              "<td style='text-align:right; color:" + (GREEN if i >= 0 else RED) + ";'>" + "{:+.2f}%".format(i) + "</td>"
+                              "<td style='text-align:right; font-weight:600; color:" + (GREEN if b >= 0 else RED) + ";'>" + "{:+.2f}%".format(b) + "</td>"
+                              "<td style='text-align:right; color:" + MUTED + ";'>" + "{:+.2f}%".format(ic) + "</td>"
+                              "<td style='text-align:right; font-weight:600; color:" + (GREEN if bc >= 0 else RED) + ";'>" + "{:+.2f}%".format(bc) + "</td></tr>")
+            st.markdown("<table class='ns-tbl'><tr>"
+                        "<th style='text-align:left;'>Month</th>"
+                        "<th style='text-align:right;'>SPX</th><th style='text-align:right;'>Book</th>"
+                        "<th style='text-align:right;'>SPX cum.</th><th style='text-align:right;'>Book cum.</th>"
+                        "</tr>" + rows_html + "</table>", unsafe_allow_html=True)
+
+            n_months = len([m for m in months if m in book_monthly.index])
+            method = ("Each closed trade is weighted at {:.1f}% of the book (an equal slice of {} maximum positions), "
+                      "so a trade's contribution is its return times that weight — not the raw trade percentage. "
+                      "Uninvested cash earns nothing. SPX is the price index over the same months."
+                      ).format(default_w, MAX_OPEN_POSITIONS)
+            if n_months < 3:
+                method += " With only {} month{} of closed trades, treat these figures as a starting point rather than a track record.".format(
+                    n_months, "" if n_months == 1 else "s")
+            st.markdown("<div class='ns-panel' style='margin-top:10px; border-left:3px solid " + BLUE + ";'>"
+                        "<span style='font-size:13px; color:#cdd8e4;'><strong>How this is calculated.</strong> " + method
+                        + "</span></div>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11px; text-align:center; margin-top:18px;'>"
                 "This is not trading advice. This is purely for information/education. Positions reflect the author's own tracking portfolio.</p>", unsafe_allow_html=True)
