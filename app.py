@@ -898,8 +898,7 @@ elif page_selection == "Swing Book":
 elif page_selection == "Weekly Recap":
 
     st.title("Next Step Trading: The Tape Report")
-    st.markdown("<p style='color:" + MUTED + "; font-size:15px;'>How the week traded — measured against the levels published before each open.</p>",
-                unsafe_allow_html=True)
+    _title_ph = st.empty()   # product name is appended once the selection is known
 
     # Sector ETFs and the movers watchlist are fixed, so this page needs no weekly upkeep.
     SECTORS = {"XLK": "Technology", "XLF": "Financials", "XLE": "Energy", "XLV": "Health Care",
@@ -909,9 +908,24 @@ elif page_selection == "Weekly Recap":
                  "JPM", "GS", "BAC", "V", "MA", "XOM", "CVX", "COP", "UNH", "LLY", "JNJ", "MRK",
                  "CAT", "BA", "GE", "WMT", "COST", "HD", "PG", "KO", "DIS", "CRM", "ORCL", "PLTR"]
 
-    wk_col1, wk_col2 = st.columns([1, 3])
+    # Asset registry — add a row here to support another product later.
+    # "peer" is the counterpart shown in the comparison tile; "futures" adds an overnight session block.
+    WEEKLY_ASSETS = {
+        "S&P 500 Index (SPX)":   dict(yf="^SPX",  sheet="^SPX",  label="SPX", peer="^NDX", peer_label="NDX", futures=False),
+        "E-mini S&P (ES_F)":     dict(yf="ES=F",  sheet="ES=F",  label="ES",  peer="NQ=F", peer_label="NQ",  futures=True),
+        "Nasdaq 100 (NDX)":      dict(yf="^NDX",  sheet="^NDX",  label="NDX", peer="^SPX", peer_label="SPX", futures=False),
+        "Nasdaq Futures (NQ_F)": dict(yf="NQ=F",  sheet="NQ=F",  label="NQ",  peer="ES=F", peer_label="ES",  futures=True),
+    }
+
+    wk_col1, wk_col2 = st.columns([1, 2])
     with wk_col1:
         week_choice = st.radio("Week:", ["This week", "Last week"], horizontal=True)
+    with wk_col2:
+        asset_choice = st.radio("Product:", list(WEEKLY_ASSETS.keys()), horizontal=True)
+    A = WEEKLY_ASSETS[asset_choice]
+    _title_ph.markdown("<p style='color:" + MUTED + "; font-size:15px; margin-top:-10px;'>Showing <strong style='color:"
+                       + TEXT + ";'>" + A["label"] + "</strong> — how the week traded, measured against the levels published before each open.</p>",
+                       unsafe_allow_html=True)
     offset = 0 if week_choice == "This week" else 1
     try:
         today = pd.Timestamp.now(tz="US/Eastern").normalize()
@@ -919,8 +933,37 @@ elif page_selection == "Weekly Recap":
         today = pd.Timestamp.now().normalize()   # tzdata unavailable; fall back to naive time
     week_start = (today - pd.Timedelta(days=today.weekday())) - pd.Timedelta(weeks=offset)
     week_end = week_start + pd.Timedelta(days=4)
-    st.caption("Week of " + week_start.strftime("%b %d") + " – " + week_end.strftime("%b %d, %Y")
-               + " · generated automatically from the published levels and market data")
+    # Is the selected week finished, and is today's session still open?
+    try:
+        now_et = pd.Timestamp.now(tz="US/Eastern")
+    except Exception:
+        now_et = pd.Timestamp.now()
+    today_date = now_et.normalize().date()
+    week_complete = today_date > week_end.date()
+    session_open = (today_date <= week_end.date() and today_date >= week_start.date()
+                    and now_et.weekday() < 5 and 9 <= now_et.hour < 16)
+
+    range_txt = "Week of " + week_start.strftime("%b %d") + " – " + week_end.strftime("%b %d, %Y")
+    if week_complete:
+        st.markdown("<div style='background:" + PANEL + "; border:1px solid " + LINE + "; border-left:3px solid " + GREEN
+                    + "; border-radius:0 8px 8px 0; padding:11px 15px; margin-bottom:6px;'>"
+                    "<span style='font-size:13.5px; color:#cdd8e4;'><strong>" + range_txt + " — complete.</strong> "
+                    "All five sessions are settled; nothing below will change.</span></div>", unsafe_allow_html=True)
+    else:
+        done = [d.strftime("%a") for d in pd.date_range(week_start, min(now_et.normalize(), week_end)) if d.weekday() < 5]
+        partial = ""
+        if session_open and done:
+            partial = (" <strong>" + done[-1] + " is still trading</strong>, so today's column, the price profile "
+                       "and the movers all move with the tape.")
+        elif done:
+            partial = " " + done[-1] + " has settled; the rest of the week is still to come."
+        st.markdown("<div style='background:" + PANEL + "; border:1px solid " + LINE + "; border-left:3px solid " + AMBER
+                    + "; border-radius:0 8px 8px 0; padding:11px 15px; margin-bottom:6px;'>"
+                    "<span style='font-size:13.5px; color:#cdd8e4;'><strong>Week to date — " + range_txt + ".</strong> "
+                    "Every section below covers Monday's open through the latest print, not a finished week."
+                    + partial + " Publish from the completed week for final numbers.</span></div>",
+                    unsafe_allow_html=True)
+    st.caption("Generated automatically from the published levels and market data · prices refresh every 15 minutes")
 
     @st.cache_data(ttl=900)
     def get_week_bars(ticker, start_str, end_str):
@@ -948,9 +991,8 @@ elif page_selection == "Weekly Recap":
     s_str = week_start.strftime("%Y-%m-%d")
     e_str = (week_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
-    bars = get_week_bars("^SPX", s_str, e_str)
-    nq_daily = get_week_change(["^NDX"], s_str, e_str)
-    spx_daily = get_week_change(["^SPX"], s_str, e_str)
+    bars = get_week_bars(A["yf"], s_str, e_str)
+    peer_daily = get_week_change([A["peer"]], s_str, e_str)
 
     if bars is None or bars.empty:
         st.info("Market data for this week isn't available yet. Intraday history is limited to roughly the last 60 days.")
@@ -964,12 +1006,13 @@ elif page_selection == "Weekly Recap":
     wk_pct = (wk_close / wk_open - 1.0) * 100.0
     wk_range = float(daily["High"].max() - daily["Low"].min())
 
-    tiles = tile("SPX On The Week", "{:+.1f}%".format(wk_pct),
+    tiles = tile(A["label"] + " On The Week", "{:+.1f}%".format(wk_pct),
                  "{:,.0f} → {:,.0f}".format(wk_open, wk_close), GREEN if wk_pct >= 0 else RED)
-    if "^NDX" in nq_daily:
-        nq_pct = nq_daily["^NDX"]
-        tiles += tile("NDX On The Week", "{:+.1f}%".format(nq_pct),
-                      "led" if abs(nq_pct) > abs(wk_pct) else "lagged", GREEN if nq_pct >= 0 else RED)
+    if A["peer"] in peer_daily:
+        peer_pct = peer_daily[A["peer"]]
+        tiles += tile(A["peer_label"] + " On The Week", "{:+.1f}%".format(peer_pct),
+                      "led " + A["label"] if abs(peer_pct) > abs(wk_pct) else "lagged " + A["label"],
+                      GREEN if peer_pct >= 0 else RED)
     tiles += tile("Weekly Range", "{:,.0f} pts".format(wk_range),
                   "{:,.0f} low → {:,.0f} high".format(float(daily["Low"].min()), float(daily["High"].max())))
 
@@ -987,7 +1030,7 @@ elif page_selection == "Weekly Recap":
 
     try:
         lv = pd.read_csv(SHEET_URL)
-        lv = lv[lv["Ticker"] == "^SPX"] if "^SPX" in set(lv["Ticker"]) else lv[lv["Ticker"] == "ES=F"]
+        lv = lv[lv["Ticker"].astype(str).str.strip() == A["sheet"]]
         if "Date" in lv.columns:
             lv["_dt"] = parse_date_col(lv["Date"]).dt.normalize()
     except Exception:
@@ -1013,10 +1056,13 @@ elif page_selection == "Weekly Recap":
                 zone_days[key].add(r["_dt"].date())
 
         keys = sorted(zone_days.keys(), key=lambda z: -z[2])
-        day_labels = [d.strftime("%a") for d in daily.index]
         head = "<tr><th style='text-align:left; width:230px;'>Published Level</th>"
-        for dl in day_labels:
-            head += "<th>" + dl + "</th>"
+        for d in daily.index:
+            is_live = session_open and d.date() == today_date
+            head += ("<th>" + d.strftime("%a")
+                     + ("<div style='color:" + AMBER + "; font-size:9.5px; letter-spacing:0.4px; font-weight:600;'>LIVE</div>"
+                        if is_live else "")
+                     + "</th>")
         head += "</tr>"
 
         style_map = {"hold": ("rgba(38,166,154,.22)", GREEN, "HELD"), "break": ("rgba(239,83,80,.22)", RED, "BRK"),
@@ -1065,6 +1111,12 @@ elif page_selection == "Weekly Recap":
     st.markdown("<div class='ns-row'>" + tiles + "</div>", unsafe_allow_html=True)
     st.divider()
 
+    if not card_html:
+        st.markdown("<div class='ns-section'>📋 The Level Report Card</div>", unsafe_allow_html=True)
+        st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13.5px;'>"
+                    "No published levels found for <strong>" + A["sheet"] + "</strong> in the levels sheet. "
+                    "Add rows with that ticker and the report card will grade them automatically.</div>",
+                    unsafe_allow_html=True)
     if card_html:
         st.markdown("<div class='ns-section'>📋 The Level Report Card</div>", unsafe_allow_html=True)
         st.markdown("<p class='ns-sub' style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
@@ -1082,7 +1134,7 @@ elif page_selection == "Weekly Recap":
     # ---------- 2. Where the week was fought (time at price) ----------
     st.markdown("<div class='ns-section'>📊 Where The Week Was Fought</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Share of 15-minute closes by price bucket — the prices that actually mattered.</p>", unsafe_allow_html=True)
+                "Share of 15-minute closes by price bucket — the prices that actually mattered. Builds through the week as bars print.</p>", unsafe_allow_html=True)
     bucket = max(5, round(wk_range / 12.0 / 5.0) * 5)
     closes = bars["Close"].dropna()
     b_idx = (closes / bucket).round().astype(int)
@@ -1109,12 +1161,17 @@ elif page_selection == "Weekly Recap":
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                 "Net points by session block — where the week's trend actually got made.</p>", unsafe_allow_html=True)
     blocks = [("Open → 11a", 9, 11), ("Midday", 11, 14), ("2p → Close", 14, 16)]
+    if A["futures"]:
+        blocks = [("Overnight", 4, 9)] + blocks   # Globex into the RTH open
     days = list(daily.index)
     hm = "<div style='display:grid;grid-template-columns:118px repeat(" + str(len(days)) + ",1fr);gap:6px;'>"
     hm += "<div></div>"
     for d in days:
-        hm += ("<div style='font-size:12.5px;text-transform:uppercase;letter-spacing:0.7px;color:" + MUTED
-               + ";text-align:center;font-weight:600;'>" + d.strftime("%a") + "</div>")
+        _live = session_open and d.date() == today_date
+        hm += ("<div style='font-size:12.5px;text-transform:uppercase;letter-spacing:0.7px;color:"
+               + (AMBER if _live else MUTED)
+               + ";text-align:center;font-weight:600;'>" + d.strftime("%a")
+               + (" &bull; LIVE" if _live else "") + "</div>")
     cell_vals = {}
     for bname, h0, h1 in blocks:
         for d in days:
@@ -1142,7 +1199,7 @@ elif page_selection == "Weekly Recap":
     # ---------- 4. Sector rotation ----------
     st.markdown("<div class='ns-section'>🔄 Sector Rotation</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Weekly move by sector — where money came in and where it left.</p>", unsafe_allow_html=True)
+                "Move from Monday\u2019s open to the latest print — mid-week this is not yet a full week.</p>", unsafe_allow_html=True)
     sec_chg = get_week_change(list(SECTORS.keys()), s_str, e_str)
     if sec_chg:
         smax = max([abs(v) for v in sec_chg.values()] or [1.0])
@@ -1167,7 +1224,7 @@ elif page_selection == "Weekly Recap":
     # ---------- 5. Leaders and laggards ----------
     st.markdown("<div class='ns-section'>🏆 Leaders &amp; Laggards</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Biggest movers on the week from the large-cap watchlist.</p>", unsafe_allow_html=True)
+                "Biggest movers from Monday\u2019s open to the latest print — the board reshuffles as the week goes on.</p>", unsafe_allow_html=True)
     mv = get_week_change(WATCHLIST, s_str, e_str)
     if mv:
         ranked = sorted(mv.items(), key=lambda kv: -kv[1])
