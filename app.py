@@ -1094,6 +1094,8 @@ elif page_selection == "Weekly Recap":
                   "{:,.0f} low → {:,.0f} high".format(float(daily["Low"].min()), float(daily["High"].max())))
 
     # ---------- 1. Level Report Card (auto-graded) ----------
+    show_untested = st.checkbox("Show levels that were never tested this week", value=False,
+                                help="Off by default so the card stays readable. Levels price never reached are hidden.")
     def grade_level(is_support, bottom, top, d_high, d_low, d_close):
         if is_support:
             if d_low > top: return "none"
@@ -1116,10 +1118,10 @@ elif page_selection == "Weekly Recap":
     card_html, tested, held = "", 0, 0
     ma_tested = ma_held = st_tested = st_held = 0
     has_dates = (not lv.empty) and ("_dt" in lv.columns) and lv["_dt"].notna().any()
+    n_rows_all = 0
 
     if not lv.empty:
-        # Union of zones published during the week; each gets one row on the card
-        zone_days = {}
+        raw = []
         for _, r in lv.iterrows():
             try:
                 b, t = float(r["Bottom"]), float(r["Top"])
@@ -1127,12 +1129,74 @@ elif page_selection == "Weekly Recap":
                 continue
             if b > t:
                 b, t = t, b
-            key = (str(r["Type"]).strip().lower() == "support", b, t, clean_str(r.get("Label")))
-            zone_days.setdefault(key, set())
-            if has_dates and pd.notna(r.get("_dt")):
-                zone_days[key].add(r["_dt"].date())
+            raw.append(dict(sup=str(r["Type"]).strip().lower() == "support", b=b, t=t,
+                            lbl=clean_str(r.get("Label")),
+                            d=(r["_dt"].date() if (has_dates and pd.notna(r.get("_dt"))) else None)))
 
-        keys = sorted(zone_days.keys(), key=lambda z: -z[2])
+        # A level that drifts a point or two day to day is ONE level, not several.
+        # Cluster overlapping (or nearly touching) zones on the same side into one row.
+        clusters = []
+        for side in (True, False):
+            items = sorted([x for x in raw if x["sup"] == side], key=lambda x: (x["b"] + x["t"]) / 2.0)
+            cur = None
+            for it in items:
+                tol = max(3.0, ((it["b"] + it["t"]) / 2.0) * 0.0004)
+                if cur is not None and it["b"] <= cur["t"] + tol:
+                    cur["b"] = min(cur["b"], it["b"])
+                    cur["t"] = max(cur["t"], it["t"])
+                    cur["members"].append(it)
+                else:
+                    if cur is not None:
+                        clusters.append(cur)
+                    cur = dict(sup=side, b=it["b"], t=it["t"], members=[it])
+            if cur is not None:
+                clusters.append(cur)
+        clusters.sort(key=lambda c: -c["t"])
+        n_rows_all = len(clusters)
+
+        style_map = {"hold": ("rgba(38,166,154,.22)", GREEN, "HELD"), "break": ("rgba(239,83,80,.22)", RED, "BRK"),
+                     "both": ("rgba(240,185,11,.20)", AMBER, "B/R"), "none": ("#141a24", "#3d4757", "\u2014"),
+                     "unpub": ("transparent", "#2b3444", "\u00b7")}
+
+        # Grade every cluster first, then decide which rows are worth showing
+        graded_rows = []
+        for c in clusters:
+            labels_seen = [m["lbl"] for m in c["members"] if m["lbl"]]
+            lbl = max(set(labels_seen), key=labels_seen.count) if labels_seen else ""
+            is_ma = lbl.upper().endswith("MA")
+            cells, any_test = [], False
+            for _, d in daily.iterrows():
+                dt = d.name.date()
+                if has_dates:
+                    todays = [m for m in c["members"] if m["d"] == dt]
+                else:
+                    todays = c["members"]
+                if not todays:
+                    cells.append("unpub")
+                    continue
+                zb = min(m["b"] for m in todays)
+                zt = max(m["t"] for m in todays)
+                g = grade_level(c["sup"], zb, zt, float(d["High"]), float(d["Low"]), float(d["Close"]))
+                cells.append(g)
+                if g != "none":
+                    any_test = True
+                    tested += 1
+                    if is_ma:
+                        ma_tested += 1
+                    else:
+                        st_tested += 1
+                    if g == "hold":
+                        held += 1
+                        if is_ma:
+                            ma_held += 1
+                        else:
+                            st_held += 1
+            graded_rows.append(dict(sup=c["sup"], b=c["b"], t=c["t"], lbl=lbl, cells=cells, tested=any_test))
+
+        shown = graded_rows if show_untested else [r for r in graded_rows if r["tested"]]
+        if not shown:
+            shown = graded_rows
+
         head = "<tr><th style='text-align:left; width:230px;'>Published Level</th>"
         for d in daily.index:
             is_live = session_open and d.date() == today_date
@@ -1142,38 +1206,17 @@ elif page_selection == "Weekly Recap":
                      + "</th>")
         head += "</tr>"
 
-        style_map = {"hold": ("rgba(38,166,154,.22)", GREEN, "HELD"), "break": ("rgba(239,83,80,.22)", RED, "BRK"),
-                     "both": ("rgba(240,185,11,.20)", AMBER, "B/R"), "none": ("#141a24", "#3d4757", "\u2014"),
-                     "unpub": ("transparent", "#2b3444", "\u00b7")}
         body = ""
-        for key in keys:
-            is_sup, b, t, lbl = key
-            is_ma = lbl.upper().endswith("MA")
-            dot = GREEN if is_sup else RED
+        for r in shown:
+            dot = GREEN if r["sup"] else RED
             row = ("<td class='lv'><span style='display:inline-block;width:8px;height:8px;border-radius:50%;background:"
-                   + dot + ";margin-right:7px;'></span>" + level_name(is_sup, b, t, lbl) + "</td>")
-            for _, d in daily.iterrows():
-                dt = d.name.date()
-                if has_dates and zone_days[key] and dt not in zone_days[key]:
-                    g = "unpub"   # this level was not on the board that morning
-                else:
-                    g = grade_level(is_sup, b, t, float(d["High"]), float(d["Low"]), float(d["Close"]))
-                    if g != "none":
-                        tested += 1
-                        if is_ma:
-                            ma_tested += 1
-                        else:
-                            st_tested += 1
-                        if g == "hold":
-                            held += 1
-                            if is_ma:
-                                ma_held += 1
-                            else:
-                                st_held += 1
+                   + dot + ";margin-right:7px;'></span>" + level_name(r["sup"], r["b"], r["t"], r["lbl"]) + "</td>")
+            for g in r["cells"]:
                 bgc, fgc, txt = style_map[g]
                 row += ("<td><span style='display:block;height:32px;line-height:32px;border-radius:5px;background:" + bgc
                         + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:14px;font-weight:600;'>" + txt + "</span></td>")
             body += "<tr>" + row + "</tr>"
+
         card_html = ("<style>.rc{width:100%;border-collapse:collapse}"
                      ".rc th{font-size:12.5px;text-transform:uppercase;letter-spacing:0.7px;color:" + MUTED
                      + ";padding:0 0 11px;font-weight:600;text-align:center}"
@@ -1188,16 +1231,17 @@ elif page_selection == "Weekly Recap":
     st.markdown("<div class='ns-row'>" + tiles + "</div>", unsafe_allow_html=True)
     st.divider()
 
-    if not card_html:
+    if card_html or lv.empty:
         st.markdown("<div class='ns-section'>📋 The Level Report Card</div>", unsafe_allow_html=True)
+    if not card_html:
         st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13.5px;'>"
                     "No published levels found for <strong>" + A["sheet"] + "</strong> in the levels sheet. "
                     "Add rows with that ticker and the report card will grade them automatically.</div>",
                     unsafe_allow_html=True)
     if card_html:
-        st.markdown("<div class='ns-section'>📋 The Level Report Card</div>", unsafe_allow_html=True)
         st.markdown("<p class='ns-sub' style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                    "Graded automatically: HELD = tested and respected · BRK = closed through · B/R = broke intraday, closed back</p>",
+                    "Graded automatically: HELD = tested and respected · BRK = closed through · B/R = broke intraday, closed back. "
+                    "Levels that drift a point or two day to day are grouped into one row.</p>",
                     unsafe_allow_html=True)
         st.markdown("<div class='ns-panel'>" + card_html + "</div>", unsafe_allow_html=True)
         if ma_tested and st_tested:
@@ -1276,7 +1320,7 @@ elif page_selection == "Weekly Recap":
     # ---------- 4. Sector rotation ----------
     st.markdown("<div class='ns-section'>🔄 Sector Rotation</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Move from Monday\u2019s open to the latest print — mid-week this is not yet a full week.</p>", unsafe_allow_html=True)
+                "Move from Monday\u2019s open to the latest print for the selected week.</p>", unsafe_allow_html=True)
     sec_chg = get_week_change(list(SECTORS.keys()), s_str, e_str)
     if sec_chg:
         smax = max([abs(v) for v in sec_chg.values()] or [1.0])
