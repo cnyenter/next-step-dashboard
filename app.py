@@ -39,7 +39,80 @@ p, div, span { font-family: 'IBM Plex Sans', sans-serif; }
 """
 st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
 
-st_autorefresh(interval=60000, key="data_refresh")
+
+import time
+
+def _fetch_with_retry(fn, attempts=3, base_delay=1.5):
+    """Yahoo rate-limits aggressively. Retry with backoff, then give up quietly."""
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:
+            last = e
+            if i < attempts - 1:
+                time.sleep(base_delay * (2 ** i))
+    raise last
+
+def fetch_history(ticker, **kwargs):
+    return _fetch_with_retry(lambda: yf.Ticker(ticker).history(**kwargs))
+
+def fetch_many_changes(tickers, start_str, end_str):
+    """Percent change (first open -> last close) for many tickers in ONE request."""
+    if not tickers:
+        return {}
+    out = {}
+    try:
+        data = _fetch_with_retry(lambda: yf.download(
+            tickers=" ".join(tickers), start=start_str, end=end_str, interval="1d",
+            group_by="ticker", auto_adjust=True, progress=False, threads=False))
+    except Exception:
+        return {}
+    if data is None or len(data) == 0:
+        return {}
+    for t in tickers:
+        try:
+            if isinstance(data.columns, pd.MultiIndex):
+                if t not in data.columns.get_level_values(0):
+                    continue
+                sub = data[t].dropna(how="all")
+            else:
+                sub = data.dropna(how="all")
+            if len(sub) < 1:
+                continue
+            o, c = float(sub["Open"].iloc[0]), float(sub["Close"].iloc[-1])
+            if o:
+                out[t] = (c / o - 1.0) * 100.0
+        except Exception:
+            continue
+    return out
+
+def fetch_many_last(tickers):
+    """Latest close for many tickers in ONE request."""
+    if not tickers:
+        return {}
+    out = {}
+    try:
+        data = _fetch_with_retry(lambda: yf.download(
+            tickers=" ".join(tickers), period="5d", interval="1d",
+            group_by="ticker", auto_adjust=True, progress=False, threads=False))
+    except Exception:
+        return {}
+    if data is None or len(data) == 0:
+        return {}
+    for t in tickers:
+        try:
+            if isinstance(data.columns, pd.MultiIndex):
+                if t not in data.columns.get_level_values(0):
+                    continue
+                sub = data[t].dropna(how="all")
+            else:
+                sub = data.dropna(how="all")
+            if len(sub):
+                out[t] = float(sub["Close"].iloc[-1])
+        except Exception:
+            continue
+    return out
 
 def tile(label, value, sub="", color=TEXT):
     return ("<div class='ns-tile'><div class='ns-label'>" + label + "</div>"
@@ -107,6 +180,8 @@ SWING_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZ
 # ==========================================
 if page_selection == "Live Cockpit":
 
+    st_autorefresh(interval=60000, key="data_refresh")   # only the live page needs to poll
+
     st.sidebar.title("🎛️ Dashboard Controls")
     selected_asset = st.sidebar.radio("Select Active Asset:", ["E-mini Futures (ES_F)", "S&P 500 Index (SPX)"])
     selected_timeframe = st.sidebar.selectbox("Select Candle Interval:", ["1-Minute", "5-Minute", "15-Minute", "1-Hour", "Daily"], index=2)
@@ -129,12 +204,12 @@ if page_selection == "Live Cockpit":
     # ---- Data fetch ----
     @st.cache_data(ttl=50)
     def get_market_data(ticker, period, interval):
-        main_asset = yf.Ticker(ticker).history(period=period, interval=interval)
-        oil = yf.Ticker("CL=F").history(period="2d", interval="15m")
-        vix = yf.Ticker("^VIX").history(period="2d", interval="15m")
-        tf_15m = yf.Ticker(ticker).history(period="5d", interval="15m")
-        tf_1h = yf.Ticker(ticker).history(period="1mo", interval="1h")
-        tf_1d = yf.Ticker(ticker).history(period="6mo", interval="1d")
+        main_asset = fetch_history(ticker, period=period, interval=interval)
+        oil = fetch_history("CL=F", period="2d", interval="15m")
+        vix = fetch_history("^VIX", period="2d", interval="15m")
+        tf_15m = fetch_history(ticker, period="5d", interval="15m")
+        tf_1h = fetch_history(ticker, period="1mo", interval="1h")
+        tf_1d = fetch_history(ticker, period="6mo", interval="1d")
         return main_asset, oil, vix, tf_15m, tf_1h, tf_1d
 
     @st.cache_data(ttl=50)
@@ -142,14 +217,21 @@ if page_selection == "Live Cockpit":
         out = {}
         for sym in ["ES=F", "^SPX"]:
             try:
-                h = yf.Ticker(sym).history(period="1d", interval="1m")
+                h = fetch_history(sym, period="1d", interval="1m")
                 if not h.empty:
                     out[sym] = float(h["Close"].iloc[-1])
             except Exception:
                 pass
         return out
 
-    df_main, df_oil, df_vix, df_15m, df_1h, df_1d = get_market_data(active_ticker, api_period, api_interval)
+    try:
+        df_main, df_oil, df_vix, df_15m, df_1h, df_1d = get_market_data(active_ticker, api_period, api_interval)
+    except Exception as e:
+        if "RateLimit" in type(e).__name__ or "rate" in str(e).lower():
+            st.warning("Yahoo Finance is rate-limiting requests right now. Wait a minute and reload.")
+        else:
+            st.warning("Market data could not be loaded right now. Wait a moment and reload.")
+        st.stop()
 
     if df_main.empty:
         st.error("⚠️ Data temporarily unavailable.")
@@ -523,17 +605,10 @@ elif page_selection == "Swing Book":
         df["Side"] = df["Side"].astype(str).str.strip().str.title()
         return df
 
-    @st.cache_data(ttl=60)
+    @st.cache_data(ttl=300)
     def get_live_prices(tickers):
-        prices = {}
-        for t in tickers:
-            try:
-                h = yf.Ticker(t).history(period="2d")
-                if not h.empty:
-                    prices[t] = float(h["Close"].iloc[-1])
-            except Exception:
-                pass
-        return prices
+        # One batched request for every open position
+        return fetch_many_last(list(tickers))
 
     try:
         book = load_swing_book(SWING_SHEET_URL)
@@ -558,7 +633,7 @@ elif page_selection == "Swing Book":
     # ---- SPX benchmark ----
     @st.cache_data(ttl=900)
     def get_bench_daily(start_str):
-        h = yf.Ticker("^SPX").history(start=start_str)
+        h = fetch_history("^SPX", start=start_str)
         if h.empty:
             return None
         h = h.copy()
@@ -967,7 +1042,7 @@ elif page_selection == "Weekly Recap":
 
     @st.cache_data(ttl=900)
     def get_week_bars(ticker, start_str, end_str):
-        h = yf.Ticker(ticker).history(start=start_str, end=end_str, interval="15m")
+        h = fetch_history(ticker, start=start_str, end=end_str, interval="15m")
         if h.empty:
             return None
         try:
@@ -976,22 +1051,24 @@ elif page_selection == "Weekly Recap":
             pass
         return h
 
-    @st.cache_data(ttl=900)
+    @st.cache_data(ttl=1800)
     def get_week_change(tickers, start_str, end_str):
-        out = {}
-        for t in tickers:
-            try:
-                h = yf.Ticker(t).history(start=start_str, end=end_str, interval="1d")
-                if len(h) >= 1:
-                    out[t] = (float(h["Close"].iloc[-1]) / float(h["Open"].iloc[0]) - 1.0) * 100.0
-            except Exception:
-                pass
-        return out
+        # One batched request for the whole list instead of one call per ticker
+        return fetch_many_changes(list(tickers), start_str, end_str)
 
     s_str = week_start.strftime("%Y-%m-%d")
     e_str = (week_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
-    bars = get_week_bars(A["yf"], s_str, e_str)
+    try:
+        bars = get_week_bars(A["yf"], s_str, e_str)
+    except Exception as e:
+        bars = None
+        if "RateLimit" in type(e).__name__ or "rate" in str(e).lower():
+            st.warning("Yahoo Finance is rate-limiting requests right now. Wait a minute and reload — "
+                       "the data is cached for 15 minutes once it loads.")
+        else:
+            st.warning("Market data could not be loaded right now. Wait a moment and reload.")
+        st.stop()
     peer_daily = get_week_change([A["peer"]], s_str, e_str)
 
     if bars is None or bars.empty:
