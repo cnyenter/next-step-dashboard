@@ -242,6 +242,35 @@ if page_selection == "Live Cockpit":
         tf_1d = fetch_history(ticker, period="6mo", interval="1d")
         return main_asset, oil, vix, tf_15m, tf_1h, tf_1d
 
+    @st.cache_data(ttl=120)
+    def get_implied_spx_open():
+        """Where SPX would open if you applied ES's move since the cash close.
+
+        SPX levels get published before the cash market opens, so a gap can flip a
+        level's role before the bell. ES trades through globex, so its move since
+        Friday's 4pm print is the best available estimate of Monday's cash open.
+        """
+        try:
+            spx_d = fetch_history("^SPX", period="5d", interval="1d")
+            es_15 = fetch_history("ES=F", period="5d", interval="15m")
+            if spx_d is None or spx_d.empty or es_15 is None or es_15.empty:
+                return None
+            spx_close = float(spx_d["Close"].iloc[-1])
+            spx_date = spx_d.index[-1].date()
+            try:
+                es_15.index = es_15.index.tz_convert("US/Eastern")
+            except (TypeError, AttributeError):
+                pass
+            ref = es_15[[(d.date() == spx_date and d.hour < 16) for d in es_15.index]]
+            if ref.empty:
+                return None
+            es_ref = float(ref["Close"].iloc[-1])
+            es_now = float(es_15["Close"].iloc[-1])
+            gap = es_now - es_ref
+            return dict(close=spx_close, gap=gap, implied=spx_close + gap, asof=spx_date)
+        except Exception:
+            return None
+
     @st.cache_data(ttl=50)
     def get_basis_prices():
         out = {}
@@ -310,6 +339,14 @@ if page_selection == "Live Cockpit":
         vit += tile("Range Used Today", "{:.0f}%".format(range_used), "of the implied range", ru_color)
     if basis is not None:
         vit += tile("ES – SPX Basis", "{:+.1f}".format(basis), "add to SPX levels for ES", BLUE)
+
+    imp = get_implied_spx_open()
+    if imp is not None and abs(imp["gap"]) >= 0.5:
+        gap_col = GREEN if imp["gap"] >= 0 else RED
+        vit += tile("Implied SPX Open", "{:,.0f}".format(imp["implied"]),
+                    "{:+.0f} vs the {} close ({:,.0f})".format(imp["gap"],
+                                                               imp["asof"].strftime("%a"), imp["close"]),
+                    gap_col)
     st.markdown("<div class='ns-row'>" + vit + "</div>", unsafe_allow_html=True)
     st.divider()
 
@@ -332,6 +369,38 @@ if page_selection == "Live Cockpit":
         st.caption(levels_note)
     elif levels_asof is not None:
         st.caption("Levels as published " + levels_asof.strftime("%b %d, %Y"))
+
+    # Cash indices stop printing at 4pm, so while levels are being published overnight the
+    # live price is a stale close. Compare the published levels against the implied open
+    # instead: a support above that open will act as resistance when the bell rings.
+    if (not filtered_levels.empty) and (not active_ticker.endswith("=F")) \
+            and imp is not None and abs(imp["gap"]) >= 0.5:
+        flipped_levels = []
+        for _, _r in filtered_levels.iterrows():
+            try:
+                _b, _t = float(_r["Bottom"]), float(_r["Top"])
+            except Exception:
+                continue
+            if _b > _t:
+                _b, _t = _t, _b
+            _mid = (_b + _t) / 2.0
+            _sup = str(_r["Type"]).strip().lower() == "support"
+            _above = _mid >= imp["implied"]
+            if (_sup and _above) or ((not _sup) and not _above):
+                _lbl = clean_str(_r.get("Label"))
+                _nm = "{:,.0f}".format(_b) if abs(_t - _b) < 0.5 else "{:,.0f} – {:,.0f}".format(_b, _t)
+                flipped_levels.append(("Support" if _sup else "Resistance") + " " + _nm
+                                      + ((" (" + _lbl + ")") if _lbl else ""))
+        if flipped_levels:
+            st.markdown("<div class='ns-panel' style='border-left:3px solid " + AMBER + "; margin-top:6px;'>"
+                        "<span style='font-size:13.5px; color:#cdd8e4;'><strong>"
+                        + str(len(flipped_levels)) + " published level"
+                        + ("" if len(flipped_levels) == 1 else "s")
+                        + " will change role at the implied open of "
+                        + "{:,.0f}".format(imp["implied"]) + ".</strong> "
+                        + "; ".join(flipped_levels)
+                        + ". A support above the open acts as resistance at the bell, and a resistance "
+                          "below it acts as support.</span></div>", unsafe_allow_html=True)
 
     # ---- MenthorQ dealer levels ----
     active_mq_url = MQ_ES_SHEET_URL if active_ticker == "ES=F" else MQ_SPX_SHEET_URL
@@ -497,64 +566,6 @@ if page_selection == "Live Cockpit":
                     config={"scrollZoom": True, "displaylogo": False,
                             "modeBarButtonsToRemove": ["select2d", "lasso2d"]})
     st.caption("Chart opens zoomed to the session. Scroll or drag to zoom out — every published level is plotted, including those outside the current view.")
-
-    # ---- Distance to Your Levels ladder ----
-    if not filtered_levels.empty:
-        st.markdown("<div class='ns-section'>📏 Distance To The Published Levels "
-                    "<span style='font-size:12.5px; font-weight:400; text-transform:none; letter-spacing:0; color:" + MUTED + ";'>"
-                    "&nbsp;— points to the near edge of each zone</span></div>", unsafe_allow_html=True)
-        rows = []
-        for _, row in filtered_levels.iterrows():
-            try:
-                mid = (float(row['Bottom']) + float(row['Top'])) / 2.0
-                rows.append((str(row['Type']).strip().title(), float(row['Bottom']), float(row['Top']), mid,
-                             clean_str(row.get("Label"))))
-            except Exception:
-                continue
-        above = sorted([r for r in rows if r[3] >= latest_price], key=lambda r: r[3])[:5]
-        below = sorted([r for r in rows if r[3] < latest_price], key=lambda r: -r[3])[:5]
-
-        def ladder_row(r, nearest):
-            typ, bottom, top, mid, lbl = r
-            color = GREEN if typ == "Support" else RED
-            border = "border:1px solid " + (BLUE if nearest else LINE) + ";"
-            zone = "{:,.0f}".format(mid) if abs(top - bottom) < 1 else "{:,.0f} – {:,.0f}".format(bottom, top)
-            tag = ("<span style='color:" + MUTED + "; font-size:12px; margin-left:7px;'>" + lbl + "</span>") if lbl else ""
-            in_zone = bottom <= latest_price <= top
-            if in_zone:
-                dist_html = ("<span style='margin-left:auto; font-family:IBM Plex Mono,monospace; font-size:14px; font-weight:600; "
-                             "color:#0d1117; background:" + AMBER + "; padding:1px 8px; border-radius:4px;'>IN ZONE</span>")
-            else:
-                # Distance to the edge price would reach first, not the midpoint
-                edge = top if mid < latest_price else bottom
-                dist = edge - latest_price
-                dist_html = ("<span style='margin-left:auto; font-family:IBM Plex Mono,monospace; font-size:15px; font-weight:600; color:"
-                             + (GREEN if dist >= 0 else RED) + ";'>" + "{:+.1f} pts".format(dist) + "</span>")
-            return ("<div style='display:flex; align-items:center; background:" + PANEL2 + "; " + border +
-                    " border-radius:6px; padding:10px 14px; margin-bottom:7px;'>"
-                    "<span style='width:10px; height:10px; border-radius:50%; background:" + color + "; margin-right:11px;'></span>"
-                    "<span style='color:" + TEXT + "; font-size:15px;'>" + typ + " <span style='font-family:IBM Plex Mono,monospace; font-weight:600;'>" + zone + "</span>" + tag + "</span>"
-                    + dist_html + "</div>")
-
-        col_a, col_b = st.columns(2)
-        with col_a:
-            html = "<div class='ns-panel'><div class='ns-label' style='margin-bottom:8px;'>Overhead</div>"
-            if above:
-                for i, r in enumerate(reversed(above)):
-                    html += ladder_row(r, nearest=(i == len(above) - 1))
-            else:
-                html += "<div style='color:" + MUTED + "; font-size:12px;'>No published levels overhead.</div>"
-            html += "</div>"
-            st.markdown(html, unsafe_allow_html=True)
-        with col_b:
-            html = "<div class='ns-panel'><div class='ns-label' style='margin-bottom:8px;'>Below</div>"
-            if below:
-                for i, r in enumerate(below):
-                    html += ladder_row(r, nearest=(i == 0))
-            else:
-                html += "<div style='color:" + MUTED + "; font-size:12px;'>No published levels below.</div>"
-            html += "</div>"
-            st.markdown(html, unsafe_allow_html=True)
 
     st.divider()
 
@@ -1174,6 +1185,7 @@ elif page_selection == "Weekly Recap":
 
     card_html, tested, held = "", 0, 0
     ma_tested = ma_held = st_tested = st_held = flips = 0
+    setups = []
     has_dates = (not lv.empty) and ("_dt" in lv.columns) and lv["_dt"].notna().any()
     n_rows_all = 0
 
@@ -1218,7 +1230,7 @@ elif page_selection == "Weekly Recap":
         n_rows_all = len(clusters)
 
         style_map = {"hold": ("rgba(38,166,154,.22)", GREEN, "HELD"), "break": ("rgba(239,83,80,.22)", RED, "BRK"),
-                     "both": ("rgba(240,185,11,.20)", AMBER, "B/R"), "none": ("#141a24", "#3d4757", "\u2014"),
+                     "both": ("rgba(240,185,11,.30)", AMBER, "LBAF"), "none": ("#141a24", "#3d4757", "\u2014"),
                      "unpub": ("transparent", "#2b3444", "\u00b7")}
 
         # Grade every cluster first, then decide which rows are worth showing
@@ -1242,6 +1254,14 @@ elif page_selection == "Weekly Recap":
                 g, eff_sup, flipped = grade_level(c["sup"], zb, zt, float(d["Open"]), float(d["High"]),
                                                   float(d["Low"]), float(d["Close"]))
                 cells.append((g, eff_sup, flipped))
+                if g == "both":
+                    # This is the look-below-and-fail / look-above-and-fail setup.
+                    d_low, d_high, d_close = float(d["Low"]), float(d["High"]), float(d["Close"])
+                    extreme = d_low if eff_sup else d_high
+                    recovered = (d_close - d_low) if eff_sup else (d_high - d_close)
+                    setups.append(dict(day=d.name, zone=(zb, zt), sup=eff_sup, lbl=lbl,
+                                       extreme=extreme, close=d_close, pts=recovered,
+                                       flipped=flipped))
                 if g != "none":
                     any_test = True
                     tested += 1
@@ -1285,6 +1305,8 @@ elif page_selection == "Weekly Recap":
                 bgc, fgc, txt = style_map[g]
                 if g == "hold":
                     txt = "HELD" if eff_sup else "REJ"
+                elif g == "both":
+                    txt = "LBAF" if eff_sup else "LAAF"
                 if flipped and g in ("hold", "break", "both"):
                     txt += "*"
                 row += ("<td><span style='display:block;height:32px;line-height:32px;border-radius:5px;background:" + bgc
@@ -1300,9 +1322,13 @@ elif page_selection == "Weekly Recap":
                      "</style><table class='rc'>" + head + body + "</table>")
 
     if tested:
-        tiles += tile("Levels Worked", "%d of %d" % (held, tested),
-                      "held or rejected when price reached them",
-                      GREEN if held >= tested * 0.6 else AMBER)
+        worked = held + len(setups)
+        tiles += tile("Levels Worked", "%d of %d" % (worked, tested),
+                      "held, rejected, or swept and reclaimed",
+                      GREEN if worked >= tested * 0.6 else AMBER)
+        if setups:
+            tiles += tile("Setups Fired", str(len(setups)),
+                          "look below / above and fail", AMBER)
     st.markdown("<div class='ns-row'>" + tiles + "</div>", unsafe_allow_html=True)
     st.divider()
 
@@ -1315,12 +1341,49 @@ elif page_selection == "Weekly Recap":
                     unsafe_allow_html=True)
     if card_html:
         st.markdown("<p class='ns-sub' style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                    "Graded by the role the level actually had at the open: HELD = held as support · REJ = rejected as resistance · "
-                    "BRK = closed through · B/R = broke intraday, closed back · — = price never reached it. "
-                    "An asterisk means a gap flipped the level from the side it was published on. "
-                    "Levels that drift a point or two day to day share a row; each moving average keeps its own.</p>",
+                    "<strong style='color:" + AMBER + ";'>LBAF</strong> = look below and fail, price swept the support and closed back above · "
+                    "<strong style='color:" + AMBER + ";'>LAAF</strong> = look above and fail, price poked the resistance and closed back below · "
+                    "HELD = support held on the test · REJ = resistance turned it away · BRK = closed through · — = price never reached it. "
+                    "Graded by the role the level actually had at the open; an asterisk means a gap flipped it from the side it was published on.</p>",
                     unsafe_allow_html=True)
         st.markdown("<div class='ns-panel'>" + card_html + "</div>", unsafe_allow_html=True)
+        if setups:
+            setups.sort(key=lambda s: -s["pts"])
+            rows_html = ""
+            for s in setups:
+                kind = "Look below and fail" if s["sup"] else "Look above and fail"
+                zb, zt = s["zone"]
+                zone_txt = "{:,.0f}".format(zb) if abs(zt - zb) < 0.5 else "{:,.0f} – {:,.0f}".format(zb, zt)
+                if s["lbl"]:
+                    zone_txt += " (" + s["lbl"] + ")"
+                rows_html += ("<tr><td style='color:" + MUTED + ";'>" + s["day"].strftime("%a") + "</td>"
+                              "<td style='font-weight:600;color:" + (GREEN if s["sup"] else RED) + ";'>" + kind + "</td>"
+                              "<td>" + zone_txt + ("*" if s["flipped"] else "") + "</td>"
+                              "<td style='text-align:right;'>" + "{:,.0f}".format(s["extreme"]) + "</td>"
+                              "<td style='text-align:right;'>" + "{:,.0f}".format(s["close"]) + "</td>"
+                              "<td style='text-align:right;font-weight:700;color:" + AMBER + ";'>"
+                              + "{:+,.0f}".format(s["pts"]) + "</td></tr>")
+            best = setups[0]
+            st.markdown("<div class='ns-section' style='margin-top:18px;'>🎯 Setups That Fired</div>",
+                        unsafe_allow_html=True)
+            st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                        "Every look-below-and-fail and look-above-and-fail at a published level this week, "
+                        "with the points from the sweep back to the close.</p>", unsafe_allow_html=True)
+            st.markdown("<table class='ns-tbl'><tr>"
+                        "<th style='text-align:left;'>Day</th><th style='text-align:left;'>Setup</th>"
+                        "<th style='text-align:left;'>Level</th><th style='text-align:right;'>Swept to</th>"
+                        "<th style='text-align:right;'>Close</th><th style='text-align:right;'>Points</th>"
+                        "</tr>" + rows_html + "</table>", unsafe_allow_html=True)
+            st.markdown("<div class='ns-panel' style='margin-top:8px; border-left:3px solid " + AMBER + ";'>"
+                        "<span style='font-size:13.5px; color:#cdd8e4;'><strong>"
+                        + str(len(setups)) + " setup" + ("" if len(setups) == 1 else "s")
+                        + " fired at published levels this week.</strong> The best was "
+                        + ("the look below and fail at " if best["sup"] else "the look above and fail at ")
+                        + ("{:,.0f}".format(best["zone"][0]) if abs(best["zone"][1] - best["zone"][0]) < 0.5
+                           else "{:,.0f} – {:,.0f}".format(best["zone"][0], best["zone"][1]))
+                        + " on " + best["day"].strftime("%A") + ", worth " + "{:,.0f}".format(best["pts"])
+                        + " points from the sweep to the close.</span></div>", unsafe_allow_html=True)
+
         if flips:
             st.markdown("<div class='ns-panel' style='margin-top:8px; border-left:3px solid " + AMBER + ";'>"
                         "<span style='font-size:13.5px; color:#cdd8e4;'><strong>" + str(flips) + " level "
