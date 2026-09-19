@@ -87,6 +87,36 @@ def fetch_many_changes(tickers, start_str, end_str):
             continue
     return out
 
+def fetch_many_closes(tickers, start_str, end_str):
+    """DataFrame of daily closes (rows = dates, cols = tickers) in ONE request."""
+    if not tickers:
+        return None
+    try:
+        data = _fetch_with_retry(lambda: yf.download(
+            tickers=" ".join(tickers), start=start_str, end=end_str, interval="1d",
+            group_by="ticker", auto_adjust=True, progress=False, threads=False))
+    except Exception:
+        return None
+    if data is None or len(data) == 0:
+        return None
+    cols = {}
+    for t in tickers:
+        try:
+            if isinstance(data.columns, pd.MultiIndex):
+                if t not in data.columns.get_level_values(0):
+                    continue
+                s = data[t]["Close"]
+            else:
+                s = data["Close"]
+            s = s.dropna()
+            if len(s):
+                cols[t] = s
+        except Exception:
+            continue
+    if not cols:
+        return None
+    return pd.DataFrame(cols)
+
 def fetch_many_last(tickers):
     """Latest close for many tickers in ONE request."""
     if not tickers:
@@ -1096,16 +1126,43 @@ elif page_selection == "Weekly Recap":
     # ---------- 1. Level Report Card (auto-graded) ----------
     show_untested = st.checkbox("Show levels that were never tested this week", value=False,
                                 help="Off by default so the card stays readable. Levels price never reached are hidden.")
-    def grade_level(is_support, bottom, top, d_high, d_low, d_close):
-        if is_support:
-            if d_low > top: return "none"
-            if d_close < bottom: return "break"
-            if d_low < bottom and d_close >= bottom: return "both"
-            return "hold"
-        if d_high < bottom: return "none"
-        if d_close > top: return "break"
-        if d_high > top and d_close <= top: return "both"
-        return "hold"
+    def grade_level(published_sup, bottom, top, d_open, d_high, d_low, d_close):
+        """Grade one published zone against one session, by the role it actually had.
+
+        SPX levels are published Sunday off Friday's cash close, so a Monday gap can
+        invert a level before the cash open. A zone below the open acts as support and
+        a zone above it acts as resistance, whatever it was labelled on Sunday. Grading
+        by the effective role keeps the level in play instead of scoring a false break.
+
+        Returns (grade, effective_sup, flipped).
+        """
+        if d_open >= top:
+            eff = True          # price opened above the zone: it is support today
+        elif d_open <= bottom:
+            eff = False         # price opened below the zone: it is resistance today
+        else:
+            eff = published_sup  # opened inside the zone; keep the published role
+        flipped = (eff != published_sup)
+
+        if eff:
+            if d_low > top:
+                g = "none"
+            elif d_close < bottom:
+                g = "break"
+            elif d_low < bottom and d_close >= bottom:
+                g = "both"
+            else:
+                g = "hold"
+        else:
+            if d_high < bottom:
+                g = "none"
+            elif d_close > top:
+                g = "break"
+            elif d_high > top and d_close <= top:
+                g = "both"
+            else:
+                g = "hold"
+        return g, eff, flipped
 
     try:
         lv = pd.read_csv(SHEET_URL)
@@ -1116,7 +1173,7 @@ elif page_selection == "Weekly Recap":
         lv = pd.DataFrame()
 
     card_html, tested, held = "", 0, 0
-    ma_tested = ma_held = st_tested = st_held = 0
+    ma_tested = ma_held = st_tested = st_held = flips = 0
     has_dates = (not lv.empty) and ("_dt" in lv.columns) and lv["_dt"].notna().any()
     n_rows_all = 0
 
@@ -1135,9 +1192,15 @@ elif page_selection == "Weekly Recap":
 
         # A level that drifts a point or two day to day is ONE level, not several.
         # Cluster overlapping (or nearly touching) zones on the same side into one row.
+        # Group by side AND label first: the 8MA and the 21MA are different levels
+        # even when their ranges happen to overlap on different days of the week.
+        groups = {}
+        for x in raw:
+            groups.setdefault((x["sup"], x["lbl"].strip().upper()), []).append(x)
+
         clusters = []
-        for side in (True, False):
-            items = sorted([x for x in raw if x["sup"] == side], key=lambda x: (x["b"] + x["t"]) / 2.0)
+        for (side, _lblkey), grp in groups.items():
+            items = sorted(grp, key=lambda x: (x["b"] + x["t"]) / 2.0)
             cur = None
             for it in items:
                 tol = max(3.0, ((it["b"] + it["t"]) / 2.0) * 0.0004)
@@ -1176,11 +1239,14 @@ elif page_selection == "Weekly Recap":
                     continue
                 zb = min(m["b"] for m in todays)
                 zt = max(m["t"] for m in todays)
-                g = grade_level(c["sup"], zb, zt, float(d["High"]), float(d["Low"]), float(d["Close"]))
-                cells.append(g)
+                g, eff_sup, flipped = grade_level(c["sup"], zb, zt, float(d["Open"]), float(d["High"]),
+                                                  float(d["Low"]), float(d["Close"]))
+                cells.append((g, eff_sup, flipped))
                 if g != "none":
                     any_test = True
                     tested += 1
+                    if flipped:
+                        flips += 1
                     if is_ma:
                         ma_tested += 1
                     else:
@@ -1211,8 +1277,16 @@ elif page_selection == "Weekly Recap":
             dot = GREEN if r["sup"] else RED
             row = ("<td class='lv'><span style='display:inline-block;width:8px;height:8px;border-radius:50%;background:"
                    + dot + ";margin-right:7px;'></span>" + level_name(r["sup"], r["b"], r["t"], r["lbl"]) + "</td>")
-            for g in r["cells"]:
+            for cell in r["cells"]:
+                if isinstance(cell, tuple):
+                    g, eff_sup, flipped = cell
+                else:
+                    g, eff_sup, flipped = cell, r["sup"], False
                 bgc, fgc, txt = style_map[g]
+                if g == "hold":
+                    txt = "HELD" if eff_sup else "REJ"
+                if flipped and g in ("hold", "break", "both"):
+                    txt += "*"
                 row += ("<td><span style='display:block;height:32px;line-height:32px;border-radius:5px;background:" + bgc
                         + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:14px;font-weight:600;'>" + txt + "</span></td>")
             body += "<tr>" + row + "</tr>"
@@ -1226,7 +1300,8 @@ elif page_selection == "Weekly Recap":
                      "</style><table class='rc'>" + head + body + "</table>")
 
     if tested:
-        tiles += tile("Levels Tested", "%d of %d" % (held, tested), "held on the day they were tested",
+        tiles += tile("Levels Worked", "%d of %d" % (held, tested),
+                      "held or rejected when price reached them",
                       GREEN if held >= tested * 0.6 else AMBER)
     st.markdown("<div class='ns-row'>" + tiles + "</div>", unsafe_allow_html=True)
     st.divider()
@@ -1240,10 +1315,20 @@ elif page_selection == "Weekly Recap":
                     unsafe_allow_html=True)
     if card_html:
         st.markdown("<p class='ns-sub' style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                    "Graded automatically: HELD = tested and respected · BRK = closed through · B/R = broke intraday, closed back. "
-                    "Levels that drift a point or two day to day are grouped into one row.</p>",
+                    "Graded by the role the level actually had at the open: HELD = held as support · REJ = rejected as resistance · "
+                    "BRK = closed through · B/R = broke intraday, closed back · — = price never reached it. "
+                    "An asterisk means a gap flipped the level from the side it was published on. "
+                    "Levels that drift a point or two day to day share a row; each moving average keeps its own.</p>",
                     unsafe_allow_html=True)
         st.markdown("<div class='ns-panel'>" + card_html + "</div>", unsafe_allow_html=True)
+        if flips:
+            st.markdown("<div class='ns-panel' style='margin-top:8px; border-left:3px solid " + AMBER + ";'>"
+                        "<span style='font-size:13.5px; color:#cdd8e4;'><strong>" + str(flips) + " level "
+                        + ("test" if flips == 1 else "tests") + " came from the opposite side.</strong> "
+                        "SPX levels are set before the cash open, so a gap can turn a published support into "
+                        "resistance (or the reverse) before the bell. Those are marked with an asterisk, and they "
+                        "still count: the price mattered, just from the other direction.</span></div>",
+                        unsafe_allow_html=True)
         if ma_tested and st_tested:
             st.markdown("<div class='ns-panel' style='margin-top:8px; border-left:3px solid " + BLUE + ";'>"
                         "<span style='font-size:13.5px; color:#cdd8e4;'><strong>Moving-average levels held "
@@ -1367,6 +1452,109 @@ elif page_selection == "Weekly Recap":
             st.markdown(mover_panel("Leaders", leaders, GREEN), unsafe_allow_html=True)
         with mc2:
             st.markdown(mover_panel("Laggards", laggards, RED), unsafe_allow_html=True)
+
+    # ---------- 6. Day-by-day consistency ----------
+    st.markdown("<div class='ns-section'>📆 Who Led And Lagged, Day By Day</div>", unsafe_allow_html=True)
+    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                "A name that leads once is noise. A name that leads four sessions out of five is a trend.</p>",
+                unsafe_allow_html=True)
+
+    @st.cache_data(ttl=1800)
+    def get_week_closes(tickers, start_str, end_str):
+        return fetch_many_closes(list(tickers), start_str, end_str)
+
+    # Reach back a week so the first session has a prior close to measure against
+    closes = get_week_closes(tuple(WATCHLIST),
+                             (week_start - pd.Timedelta(days=7)).strftime("%Y-%m-%d"), e_str)
+
+    if closes is None or closes.empty:
+        st.info("Daily data for the watchlist isn't available right now.")
+    else:
+        pct_all = closes.pct_change() * 100.0
+        in_week = [i for i, d in enumerate(pct_all.index)
+                   if week_start.date() <= d.date() <= week_end.date()]
+        pct = pct_all.iloc[in_week].dropna(how="all") if in_week else pct_all.iloc[0:0]
+
+        if len(pct) == 0:
+            st.info("No completed sessions in the selected week yet.")
+        else:
+            TOPN = 5
+            led = {t: 0 for t in pct.columns}
+            lag = {t: 0 for t in pct.columns}
+            for _, row in pct.iterrows():
+                r = row.dropna().sort_values(ascending=False)
+                if len(r) < TOPN * 2:
+                    continue
+                for t in r.index[:TOPN]:
+                    led[t] += 1
+                for t in r.index[-TOPN:]:
+                    lag[t] += 1
+            cum = ((1 + pct.fillna(0) / 100.0).prod() - 1) * 100.0
+            n_sessions = len(pct)
+            day_names = [d.strftime("%a") for d in pct.index]
+            mx = max(pct.abs().max().max(), 0.1)
+
+            def consistency_panel(title, tally, ascending, accent):
+                names = [t for t, c in tally.items() if c > 0]
+                names.sort(key=lambda t: (-tally[t], cum[t] if ascending else -cum[t]))
+                names = names[:6]
+                if not names:
+                    return ""
+                head = ("<tr><th style='text-align:left;width:74px;'>" + title + "</th>")
+                for dn in day_names:
+                    head += "<th>" + dn + "</th>"
+                head += "<th style='text-align:right;'>Week</th><th style='text-align:right;'>Days</th></tr>"
+                body = ""
+                for t in names:
+                    row = "<td class='tk'>" + t + "</td>"
+                    for d in pct.index:
+                        v = pct.loc[d, t]
+                        if pd.isna(v):
+                            bgc, fgc, txt = "#141a24", "#3d4757", "\u2014"
+                        else:
+                            inten = min(0.55, 0.10 + abs(v) / mx * 0.45)
+                            bgc = ("rgba(38,166,154,%.2f)" % inten) if v >= 0 else ("rgba(239,83,80,%.2f)" % inten)
+                            fgc = GREEN if v >= 0 else RED
+                            txt = "{:+.1f}".format(v)
+                        row += ("<td><span style='display:block;height:28px;line-height:28px;border-radius:5px;background:"
+                                + bgc + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:13px;"
+                                "font-weight:600;'>" + txt + "</span></td>")
+                    wk = float(cum[t])
+                    streak = tally[t] == n_sessions and n_sessions > 1
+                    row += ("<td style='text-align:right;font-family:IBM Plex Mono,monospace;font-size:14px;"
+                            "font-weight:600;color:" + (GREEN if wk >= 0 else RED) + ";'>" + "{:+.1f}%".format(wk) + "</td>")
+                    row += ("<td style='text-align:right;font-family:IBM Plex Mono,monospace;font-size:13px;color:"
+                            + (AMBER if streak else MUTED) + ";font-weight:" + ("700" if streak else "500") + ";'>"
+                            + str(tally[t]) + "/" + str(n_sessions) + ("  \u2605" if streak else "") + "</td>")
+                    body += "<tr>" + row + "</tr>"
+                return ("<table class='cs'>" + head + body + "</table>")
+
+            css = ("<style>.cs{width:100%;border-collapse:collapse;margin-bottom:6px}"
+                   ".cs th{font-size:11.5px;text-transform:uppercase;letter-spacing:0.7px;color:" + MUTED
+                   + ";padding:0 4px 9px;font-weight:600;text-align:center}"
+                   ".cs td{padding:4px 3px;text-align:center}"
+                   ".cs td.tk{text-align:left;font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:15px;color:"
+                   + TEXT + "}</style>")
+
+            lead_tbl = consistency_panel("Leaders", led, False, GREEN)
+            lag_tbl = consistency_panel("Laggards", lag, True, RED)
+            st.markdown("<div class='ns-panel'>" + css + lead_tbl + "</div>", unsafe_allow_html=True)
+            st.markdown("<div class='ns-panel'>" + css + lag_tbl + "</div>", unsafe_allow_html=True)
+
+            # Call out anything that never left the top or bottom five
+            perfect_up = [t for t, c in led.items() if c == n_sessions and n_sessions > 1]
+            perfect_dn = [t for t, c in lag.items() if c == n_sessions and n_sessions > 1]
+            if perfect_up or perfect_dn:
+                bits = []
+                if perfect_up:
+                    bits.append("<strong style='color:" + GREEN + ";'>" + ", ".join(sorted(perfect_up))
+                                + "</strong> finished in the top five every session")
+                if perfect_dn:
+                    bits.append("<strong style='color:" + RED + ";'>" + ", ".join(sorted(perfect_dn))
+                                + "</strong> finished in the bottom five every session")
+                st.markdown("<div class='ns-panel' style='border-left:3px solid " + AMBER + ";'>"
+                            "<span style='font-size:13.5px;color:#cdd8e4;'>Persistent all week: "
+                            + "; ".join(bits) + ". That is trend, not noise.</span></div>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
                 "This is not trading advice. This is purely for information/education.</p>", unsafe_allow_html=True)
