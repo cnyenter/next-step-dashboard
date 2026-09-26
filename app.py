@@ -1491,9 +1491,9 @@ elif page_selection == "Weekly Recap":
         st.markdown("<div class='ns-panel'>" + srow + "</div>", unsafe_allow_html=True)
 
     # ---------- 5. Leaders and laggards ----------
-    st.markdown("<div class='ns-section'>🏆 Leaders &amp; Laggards</div>", unsafe_allow_html=True)
+    st.markdown("<div class='ns-section'>🏆 Biggest Movers On The Week</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Biggest movers from Monday\u2019s open to the latest print — the board reshuffles as the week goes on.</p>", unsafe_allow_html=True)
+                "Ranked by size of move, Monday\u2019s open to the latest print. The board reshuffles as the week goes on.</p>", unsafe_allow_html=True)
     mv = get_week_change(WATCHLIST, s_str, e_str)
     if mv:
         ranked = sorted(mv.items(), key=lambda kv: -kv[1])
@@ -1517,9 +1517,11 @@ elif page_selection == "Weekly Recap":
             st.markdown(mover_panel("Laggards", laggards, RED), unsafe_allow_html=True)
 
     # ---------- 6. Day-by-day consistency ----------
-    st.markdown("<div class='ns-section'>📆 Who Led And Lagged, Day By Day</div>", unsafe_allow_html=True)
+    st.markdown("<div class='ns-section'>📆 Most Consistent, Day By Day</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "A name that leads once is noise. A name that leads four sessions out of five is a trend.</p>",
+                "Ranked by how many sessions a name finished in the top or bottom five, not by the size of its move. "
+                "A steady name can rank here without making the movers board above, and a one-day spike can do the reverse. "
+                "Week figures match that board.</p>",
                 unsafe_allow_html=True)
 
     @st.cache_data(ttl=1800)
@@ -1541,6 +1543,30 @@ elif page_selection == "Weekly Recap":
         if len(pct) == 0:
             st.info("No completed sessions in the selected week yet.")
         else:
+            # The movers board above measures Monday's OPEN to Friday's close. Daily
+            # close-to-close changes would instead carry in the weekend gap, which made
+            # the two tables disagree on the same stock's week. Take the week figure from
+            # the same source the movers board uses, then restate Monday's cell as
+            # open-to-close so the row compounds back to exactly that number.
+            wk_chg = mv if mv else {}
+            for t in list(pct.columns):
+                w = wk_chg.get(t)
+                if w is None:
+                    continue
+                rest = 1.0
+                for d in pct.index[1:]:
+                    v = pct.loc[d, t]
+                    if pd.notna(v):
+                        rest *= (1 + v / 100.0)
+                if rest:
+                    pct.loc[pct.index[0], t] = ((1 + w / 100.0) / rest - 1) * 100.0
+            cum = pd.Series({t: wk_chg.get(t, float("nan")) for t in pct.columns})
+            pct = pct[[t for t in pct.columns if pd.notna(cum[t])]]
+            cum = cum.dropna()
+            if pct.empty:
+                st.info("Weekly figures for the watchlist aren't available right now.")
+                st.stop()
+
             TOPN = 5
             led = {t: 0 for t in pct.columns}
             lag = {t: 0 for t in pct.columns}
@@ -1552,7 +1578,6 @@ elif page_selection == "Weekly Recap":
                     led[t] += 1
                 for t in r.index[-TOPN:]:
                     lag[t] += 1
-            cum = ((1 + pct.fillna(0) / 100.0).prod() - 1) * 100.0
             n_sessions = len(pct)
             day_names = [d.strftime("%a") for d in pct.index]
             mx = max(pct.abs().max().max(), 0.1)
