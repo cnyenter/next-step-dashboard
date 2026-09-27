@@ -1495,6 +1495,48 @@ elif page_selection == "Weekly Recap":
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                 "Ranked by size of move, Monday\u2019s open to the latest print. The board reshuffles as the week goes on.</p>", unsafe_allow_html=True)
     mv = get_week_change(WATCHLIST, s_str, e_str)
+
+    @st.cache_data(ttl=1800)
+    def get_hist_closes(tickers, end_str):
+        start = (pd.Timestamp(end_str) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+        return fetch_many_closes(list(tickers), start, end_str)
+
+    hist = get_hist_closes(tuple(WATCHLIST), e_str)
+
+    def trend_character(tkr):
+        """Where a name sits against its own moving averages, and how stretched it is.
+
+        A big weekly move says nothing about whether it is a good entry. A name 12%
+        above its 21MA is extended whatever the board says; one that just reclaimed
+        the 21MA is a setup. Returns (label, colour, extension %) or None.
+        """
+        if hist is None or tkr not in hist.columns:
+            return None
+        s = hist[tkr].dropna()
+        if len(s) < 60:
+            return None
+        e8 = s.ewm(span=8, adjust=False).mean()
+        e21 = s.ewm(span=21, adjust=False).mean()
+        s50 = s.rolling(50).mean()
+        px = float(s.iloc[-1])
+        ext = (px / float(e21.iloc[-1]) - 1.0) * 100.0
+        above8 = px > float(e8.iloc[-1])
+        above21 = px > float(e21.iloc[-1])
+        above50 = px > float(s50.iloc[-1]) if pd.notna(s50.iloc[-1]) else False
+        # was it under the 21 in the last week, and is it back above now?
+        recent_below = bool((s.iloc[-6:-1] < e21.iloc[-6:-1]).any())
+
+        if not above50:
+            return ("Below 50MA", RED, ext)
+        if above8 and above21 and above50:
+            if recent_below:
+                return ("Reclaim", BLUE, ext)
+            if abs(ext) >= 8.0:
+                return ("Extended", AMBER, ext)
+            return ("Continuation", GREEN, ext)
+        if above50 and not above21:
+            return ("Losing the 21MA", AMBER, ext)
+        return ("Mixed", MUTED, ext)
     if mv:
         ranked = sorted(mv.items(), key=lambda kv: -kv[1])
         leaders, laggards = ranked[:6], ranked[-6:][::-1]
@@ -1503,9 +1545,18 @@ elif page_selection == "Weekly Recap":
             h = ("<div class='ns-panel'><div style='font-size:11.5px;text-transform:uppercase;letter-spacing:0.8px;color:"
                  + MUTED + ";font-weight:600;margin-bottom:10px;'>" + title + "</div>")
             for tk, v in items:
+                ch = trend_character(tk)
+                chip = ""
+                if ch is not None:
+                    lab, ccol, ext = ch
+                    chip = ("<span style='border:1px solid " + ccol + ";color:" + ccol + ";font-size:10.5px;"
+                            "font-weight:600;padding:1px 7px;border-radius:4px;margin-left:10px;'>" + lab + "</span>"
+                            "<span style='color:" + MUTED + ";font-family:IBM Plex Mono,monospace;font-size:11.5px;"
+                            "margin-left:8px;'>" + "{:+.1f}% vs 21MA".format(ext) + "</span>")
                 h += ("<div style='display:flex;align-items:center;background:" + PANEL2 + ";border:1px solid " + LINE
                       + ";border-radius:6px;padding:9px 13px;margin-bottom:6px;'>"
                       "<span style='font-family:Space Grotesk,sans-serif;font-weight:700;font-size:14px;'>" + tk + "</span>"
+                      + chip +
                       "<span style='margin-left:auto;font-family:IBM Plex Mono,monospace;font-size:14px;font-weight:600;color:"
                       + (GREEN if v >= 0 else RED) + ";'>" + "{:+.1f}%".format(v) + "</span></div>")
             return h + "</div>"
@@ -1643,6 +1694,68 @@ elif page_selection == "Weekly Recap":
                 st.markdown("<div class='ns-panel' style='border-left:3px solid " + AMBER + ";'>"
                             "<span style='font-size:13.5px;color:#cdd8e4;'>Persistent all week: "
                             + "; ".join(bits) + ". That is trend, not noise.</span></div>", unsafe_allow_html=True)
+
+    # ---------- 7. Did last week's movers follow through? ----------
+    st.markdown("<div class='ns-section'>🔁 Did Last Week's Movers Follow Through?</div>", unsafe_allow_html=True)
+    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                "Last week's biggest movers, and what they actually did this week. "
+                "A leaders board only means something if strength carries.</p>", unsafe_allow_html=True)
+
+    pw_start = week_start - pd.Timedelta(weeks=1)
+    pw_end = week_end - pd.Timedelta(weeks=1)
+    pw_chg = get_week_change(WATCHLIST, pw_start.strftime("%Y-%m-%d"),
+                             (pw_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
+
+    if not pw_chg or not mv:
+        st.info("Not enough history to compare the two weeks yet.")
+    else:
+        pw_rank = sorted(pw_chg.items(), key=lambda kv: -kv[1])
+        prior_lead = [t for t, _ in pw_rank[:6] if t in mv]
+        prior_lag = [t for t, _ in pw_rank[-6:][::-1] if t in mv]
+
+        def follow_table(title, names, was_up):
+            if not names:
+                return ""
+            rows = ""
+            for t in names:
+                last, now = pw_chg[t], mv[t]
+                carried = (now > 0) if was_up else (now < 0)
+                if abs(now) < 0.5:
+                    verdict, vcol = "Stalled", MUTED
+                elif carried:
+                    verdict, vcol = "Continued", GREEN
+                else:
+                    verdict, vcol = "Reversed", RED
+                rows += ("<tr><td style='font-weight:700;'>" + t + "</td>"
+                         "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(last) + "</td>"
+                         "<td style='text-align:right;font-weight:600;color:" + (GREEN if now >= 0 else RED) + ";'>"
+                         + "{:+.1f}%".format(now) + "</td>"
+                         "<td style='text-align:right;color:" + vcol + ";font-weight:600;'>" + verdict + "</td></tr>")
+            return ("<div style='font-size:11.5px;text-transform:uppercase;letter-spacing:0.8px;color:" + MUTED
+                    + ";font-weight:600;margin:0 0 8px 2px;'>" + title + "</div>"
+                    "<table class='ns-tbl'><tr><th style='text-align:left;'>Ticker</th>"
+                    "<th style='text-align:right;'>Last wk</th><th style='text-align:right;'>This wk</th>"
+                    "<th style='text-align:right;'>Result</th></tr>" + rows + "</table>")
+
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            st.markdown(follow_table("Last week's leaders", prior_lead, True), unsafe_allow_html=True)
+        with fc2:
+            st.markdown(follow_table("Last week's laggards", prior_lag, False), unsafe_allow_html=True)
+
+        # The one number that answers "is chasing strength working right now?"
+        if prior_lead:
+            avg_lead = sum(mv[t] for t in prior_lead) / len(prior_lead)
+            kept = sum(1 for t in prior_lead if mv[t] > 0)
+            edge = avg_lead - wk_pct
+            st.markdown("<div class='ns-panel' style='margin-top:10px;border-left:3px solid "
+                        + (GREEN if edge >= 0 else RED) + ";'>"
+                        "<span style='font-size:13.5px;color:#cdd8e4;'><strong>Buying last week's six leaders "
+                        "returned " + "{:+.1f}%".format(avg_lead) + " on average this week</strong> against "
+                        + "{:+.1f}%".format(wk_pct) + " for the index, so chasing strength was worth "
+                        + "{:+.1f}%".format(edge) + " this week. " + str(kept) + " of " + str(len(prior_lead))
+                        + " kept going. One week is not a pattern; the value is in watching this number "
+                        "week after week.</span></div>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
                 "This is not trading advice. This is purely for information/education.</p>", unsafe_allow_html=True)
