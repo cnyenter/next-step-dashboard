@@ -196,7 +196,7 @@ def level_name(is_sup, bottom, top, label=""):
 # 2. SIDEBAR NAVIGATION ROUTER
 # ==========================================
 st.sidebar.title("🧭 Navigation")
-page_selection = st.sidebar.radio("Select View:", ["Live Cockpit", "Swing Book", "Weekly Recap"])
+page_selection = st.sidebar.radio("Select View:", ["Live Cockpit", "Swing Book", "Weekly Recap", "Swing Screener"])
 st.sidebar.divider()
 
 # Database Connections (PASTE LINKS HERE)
@@ -1776,4 +1776,261 @@ elif page_selection == "Weekly Recap":
                         "week after week.</span></div>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
+                "This is not trading advice. This is purely for information/education.</p>", unsafe_allow_html=True)
+
+
+# ==========================================
+# PAGE 4: SWING SCREENER
+# ==========================================
+elif page_selection == "Swing Screener":
+
+    st.title("Next Step Trading: Swing Screener")
+    st.markdown("<p style='color:" + MUTED + "; font-size:15px;'>The daily-chart version of the intraday method: "
+                "a pullback into the 21MA inside an established trend, a look below and fail, a structural stop, "
+                "and targets at real levels. Nothing passes without the reward paying for the risk.</p>",
+                unsafe_allow_html=True)
+
+    # ── Universe. Liquid US names; edit freely, the screener only needs tickers. ──
+    UNIVERSE = [
+        "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX","ADBE","CRM","ORCL","CSCO",
+        "INTC","QCOM","TXN","AMAT","MU","LRCX","KLAC","ADI","SNPS","CDNS","MRVL","NXPI","ON","MCHP","SMCI",
+        "PLTR","SNOW","NOW","PANW","CRWD","ZS","DDOG","NET","MDB","TEAM","WDAY","INTU","ADSK","ANSS",
+        "IBM","ACN","INFY","HPQ","DELL","WDC","STX","APH","GLW","KEYS","TER","SWKS","QRVO",
+        "JPM","BAC","WFC","GS","MS","C","USB","PNC","TFC","SCHW","BLK","BX","KKR","APO","AXP","V","MA",
+        "PYPL","FI","COF","DFS","SYF","ICE","CME","SPGI","MCO","MSCI","NDAQ","TROW","BEN","AMP",
+        "UNH","JNJ","LLY","PFE","MRK","ABBV","BMY","AMGN","GILD","BIIB","VRTX","REGN","MRNA","ZTS",
+        "TMO","DHR","ABT","SYK","BSX","MDT","EW","ISRG","HCA","CI","CVS","ELV","MCK","COR","BDX",
+        "XOM","CVX","COP","EOG","SLB","HAL","OXY","PSX","VLO","MPC","KMI","WMB","OKE","DVN","FANG","HES",
+        "BKR","TRGP","LNG","EQT","CTRA","APA","MRO","DINO",
+        "CAT","DE","BA","GE","HON","MMM","LMT","RTX","NOC","GD","EMR","ETN","PH","ITW","CMI","PCAR",
+        "UNP","CSX","NSC","UPS","FDX","DAL","UAL","LUV","WM","RSG","URI","FAST","GWW","ROK","DOV",
+        "WMT","COST","TGT","HD","LOW","DG","DLTR","KR","SYY","PG","KO","PEP","PM","MO","MDLZ","KHC",
+        "GIS","K","HSY","STZ","KDP","MNST","CL","KMB","EL","CHD","CLX",
+        "MCD","SBUX","CMG","YUM","DRI","MAR","HLT","BKNG","ABNB","LVS","MGM","RCL","CCL","NCLH",
+        "NKE","LULU","TJX","ROST","ORLY","AZO","GM","F","APTV","LEN","DHI","PHM","NVR",
+        "DIS","CMCSA","T","VZ","TMUS","CHTR","WBD","PARA","EA","TTWO","RBLX","SPOT","UBER","LYFT","DASH",
+        "LIN","APD","SHW","ECL","FCX","NEM","NUE","STLD","DOW","DD","PPG","VMC","MLM","ALB","CF","MOS",
+        "NEE","DUK","SO","D","AEP","EXC","SRE","XEL","ED","PEG","WEC","ES","PCG","VST","CEG",
+        "AMT","PLD","CCI","EQIX","PSA","SPG","O","WELL","DLR","VICI","AVB","EQR",
+    ]
+
+    # ── Controls ──
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        direction = st.radio("Setups", ["Long", "Short"], horizontal=True)
+        risk_pct = st.number_input("Risk per trade (% of book)", 0.25, 5.0, 1.5, 0.25)
+    with c2:
+        min_rr = st.number_input("Minimum R:R to T1", 1.0, 5.0, 2.0, 0.25,
+                                 help="Nothing appears unless the first target pays at least this multiple of the stop.")
+        max_ext = st.number_input("Max distance from 21MA (%)", 2.0, 20.0, 6.0, 0.5,
+                                  help="Keeps extended names out. A big move is not an entry.")
+    with c3:
+        min_dv = st.number_input("Min average dollar volume ($M)", 1.0, 500.0, 20.0, 5.0)
+        req_rs = st.checkbox("Require relative strength vs SPX (3 months)", value=True)
+
+    @st.cache_data(ttl=3600, show_spinner="Scanning the universe...")
+    def get_universe_ohlc(tickers, end_str):
+        """Daily OHLCV for the whole universe, fetched in chunks to stay under rate limits."""
+        start = (pd.Timestamp(end_str) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
+        out = {}
+        tl = list(tickers)
+        for i in range(0, len(tl), 120):
+            chunk = tl[i:i + 120]
+            try:
+                data = _fetch_with_retry(lambda c=chunk: yf.download(
+                    tickers=" ".join(c), start=start, end=end_str, interval="1d",
+                    group_by="ticker", auto_adjust=True, progress=False, threads=False))
+            except Exception:
+                continue
+            if data is None or len(data) == 0:
+                continue
+            for t in chunk:
+                try:
+                    if isinstance(data.columns, pd.MultiIndex):
+                        if t not in data.columns.get_level_values(0):
+                            continue
+                        df = data[t]
+                    else:
+                        df = data
+                    df = df.dropna(subset=["Close"])
+                    if len(df) > 120:
+                        out[t] = df
+                except Exception:
+                    continue
+        return out
+
+    end_str = (pd.Timestamp.now().normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    data = get_universe_ohlc(tuple(UNIVERSE), end_str)
+
+    if not data:
+        st.warning("Market data could not be loaded right now. Wait a moment and reload.")
+        st.stop()
+
+    # SPX benchmark for the relative strength test
+    spx_3m = None
+    try:
+        sx = fetch_history("^SPX", period="6mo", interval="1d")
+        if sx is not None and len(sx) > 65:
+            spx_3m = (float(sx["Close"].iloc[-1]) / float(sx["Close"].iloc[-64]) - 1.0) * 100.0
+    except Exception:
+        pass
+
+    def pivots(series, left_right=5, want_high=True):
+        """Local extremes: a bar that is the highest (or lowest) of the bars either side."""
+        w = left_right * 2 + 1
+        roll = series.rolling(w, center=True).max() if want_high else series.rolling(w, center=True).min()
+        return series[(series == roll)].dropna()
+
+    def scan_long(t, df):
+        c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
+        px = float(c.iloc[-1])
+        e8, e21 = c.ewm(span=8, adjust=False).mean(), c.ewm(span=21, adjust=False).mean()
+        s50 = c.rolling(50).mean()
+        if pd.isna(s50.iloc[-1]):
+            return None
+
+        # 1. established uptrend
+        if not (px > float(e21.iloc[-1]) and float(e21.iloc[-1]) > float(s50.iloc[-1]) and px > float(s50.iloc[-1])):
+            return None
+        # 2. not extended
+        ext = (px / float(e21.iloc[-1]) - 1.0) * 100.0
+        if ext > max_ext:
+            return None
+        # 3. the setup: dipped below the 21MA in the last 5 sessions and closed back above
+        recent = df.iloc[-5:]
+        swept = bool((recent["Low"] < e21.iloc[-5:]).any())
+        if not (swept and px > float(e21.iloc[-1])):
+            return None
+        # 4. liquidity
+        dv = float((c * v).tail(20).mean()) / 1e6
+        if dv < min_dv:
+            return None
+        # 5. relative strength
+        rs = (px / float(c.iloc[-64]) - 1.0) * 100.0 if len(c) > 64 else None
+        if req_rs and (rs is None or spx_3m is None or rs <= spx_3m):
+            return None
+
+        # structural stop: under the swing low that produced the pullback
+        stop = float(l.tail(10).min()) * 0.995
+        if stop >= px:
+            return None
+        risk = px - stop
+
+        # structural targets: pivot highs above price, else fib extension in blue sky
+        ph = pivots(h.tail(160), 5, True)
+        above = sorted([float(x) for x in ph.values if x > px * 1.005])
+        tg = above[:3]
+        if len(tg) < 3:
+            lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
+            rng = max(hi60 - lo60, px * 0.02)
+            for m in (1.272, 1.618, 2.0):
+                cand = lo60 + rng * m
+                if cand > px * 1.005 and all(abs(cand - x) > px * 0.005 for x in tg):
+                    tg.append(cand)
+            tg = sorted(tg)[:3]
+        if not tg:
+            return None
+
+        rr = (tg[0] - px) / risk
+        if rr < min_rr:
+            return None
+        return dict(t=t, px=px, stop=stop, tg=tg, rr=rr, ext=ext, rs=rs, dv=dv,
+                    size=risk_pct / (risk / px * 100.0) * 100.0)
+
+    def scan_short(t, df):
+        c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
+        px = float(c.iloc[-1])
+        e8, e21 = c.ewm(span=8, adjust=False).mean(), c.ewm(span=21, adjust=False).mean()
+        s50 = c.rolling(50).mean()
+        if pd.isna(s50.iloc[-1]):
+            return None
+        if not (px < float(e21.iloc[-1]) and float(e21.iloc[-1]) < float(s50.iloc[-1]) and px < float(s50.iloc[-1])):
+            return None
+        ext = (px / float(e21.iloc[-1]) - 1.0) * 100.0
+        if abs(ext) > max_ext:
+            return None
+        recent = df.iloc[-5:]
+        poked = bool((recent["High"] > e21.iloc[-5:]).any())
+        if not (poked and px < float(e21.iloc[-1])):
+            return None
+        dv = float((c * v).tail(20).mean()) / 1e6
+        if dv < min_dv:
+            return None
+        rs = (px / float(c.iloc[-64]) - 1.0) * 100.0 if len(c) > 64 else None
+        if req_rs and (rs is None or spx_3m is None or rs >= spx_3m):
+            return None
+
+        stop = float(h.tail(10).max()) * 1.005
+        if stop <= px:
+            return None
+        risk = stop - px
+
+        pl = pivots(l.tail(160), 5, False)
+        below = sorted([float(x) for x in pl.values if x < px * 0.995], reverse=True)
+        tg = below[:3]
+        if len(tg) < 3:
+            lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
+            rng = max(hi60 - lo60, px * 0.02)
+            for m in (1.272, 1.618, 2.0):
+                cand = hi60 - rng * m
+                if cand < px * 0.995 and cand > 0 and all(abs(cand - x) > px * 0.005 for x in tg):
+                    tg.append(cand)
+            tg = sorted(tg, reverse=True)[:3]
+        if not tg:
+            return None
+
+        rr = (px - tg[0]) / risk
+        if rr < min_rr:
+            return None
+        return dict(t=t, px=px, stop=stop, tg=tg, rr=rr, ext=ext, rs=rs, dv=dv,
+                    size=risk_pct / (risk / px * 100.0) * 100.0)
+
+    hits = []
+    for t, df in data.items():
+        try:
+            r = scan_long(t, df) if direction == "Long" else scan_short(t, df)
+            if r:
+                hits.append(r)
+        except Exception:
+            continue
+    hits.sort(key=lambda r: -r["rr"])
+
+    st.caption("Scanned %d names. %d passed every filter." % (len(data), len(hits)))
+
+    if not hits:
+        st.info("Nothing qualifies today. That is a valid result: in a market with no clean pullbacks, "
+                "the honest answer is no trade rather than a lower bar.")
+    else:
+        rows = ""
+        for r in hits[:15]:
+            t1, t2, t3 = (list(r["tg"]) + [None, None, None])[:3]
+            rows += ("<tr><td style='font-weight:700;'>" + r["t"] + "</td>"
+                     "<td style='text-align:right;'>" + "{:,.2f}".format(r["px"]) + "</td>"
+                     "<td style='text-align:right;color:" + RED + ";'>" + "{:,.2f}".format(r["stop"]) + "</td>"
+                     "<td style='text-align:right;color:" + GREEN + ";'>" + "{:,.2f}".format(t1) + "</td>"
+                     "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:,.2f}".format(t2) if t2 else "—") + "</td>"
+                     "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:,.2f}".format(t3) if t3 else "—") + "</td>"
+                     "<td style='text-align:right;font-weight:700;color:" + AMBER + ";'>" + "{:.1f}".format(r["rr"]) + "</td>"
+                     "<td style='text-align:right;'>" + "{:.1f}%".format(r["size"]) + "</td>"
+                     "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(r["ext"]) + "</td>"
+                     "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:+.0f}%".format(r["rs"]) if r["rs"] is not None else "—") + "</td></tr>")
+        st.markdown("<table class='ns-tbl'><tr>"
+                    "<th style='text-align:left;'>Ticker</th><th style='text-align:right;'>Entry</th>"
+                    "<th style='text-align:right;'>Stop</th><th style='text-align:right;'>T1</th>"
+                    "<th style='text-align:right;'>T2</th><th style='text-align:right;'>T3</th>"
+                    "<th style='text-align:right;'>R:R</th><th style='text-align:right;'>Size</th>"
+                    "<th style='text-align:right;'>vs 21MA</th><th style='text-align:right;'>3mo RS</th>"
+                    "</tr>" + rows + "</table>", unsafe_allow_html=True)
+
+        st.markdown("<div class='ns-panel' style='margin-top:10px;border-left:3px solid " + BLUE + ";'>"
+                    "<span style='font-size:13.5px;color:#cdd8e4;'><strong>Size</strong> is what the position should be "
+                    "as a percentage of the book so that a stop-out costs exactly "
+                    + "{:.2f}%".format(risk_pct) + " of it. A wide stop earns a small position, which is the "
+                    "mechanism that keeps risk constant instead of letting the stop distance decide it. "
+                    "<strong>Stops</strong> sit under the swing low that produced the pullback; <strong>targets</strong> "
+                    "are prior pivot highs, or fib extensions where price is in blue sky.</span></div>",
+                    unsafe_allow_html=True)
+
+    st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
+                "A screen is a starting point, not a trade list. Check earnings dates before entering anything. "
                 "This is not trading advice. This is purely for information/education.</p>", unsafe_allow_html=True)
