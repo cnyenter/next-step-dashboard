@@ -1887,7 +1887,7 @@ elif page_selection == "Swing Screener":
 
     # Defaults that the public view always uses
     direction, risk_pct, min_rr, max_ext, min_dv, req_rs = "Long", 1.5, 2.0, 6.0, 20.0, True
-    pos_cap, max_per_sector = 20.0, 2
+    pos_cap, max_per_sector = 15.0, 1
 
     if operator:
         c1, c2, c3 = st.columns(3)
@@ -1902,14 +1902,14 @@ elif page_selection == "Swing Screener":
             req_rs = st.checkbox("Require relative strength vs SPX (3 months)", value=True)
         c4, c5 = st.columns(2)
         with c4:
-            pos_cap = st.number_input("Max position size (% of book)", 5.0, 50.0, 20.0, 2.5,
+            pos_cap = st.number_input("Max position size (% of book)", 5.0, 50.0, 15.0, 2.5,
                                       help="A tight stop can justify an enormous position on paper. It cannot protect against a gap.")
         with c5:
-            max_per_sector = st.number_input("Max candidates per sector", 1, 5, 2, 1,
-                                             help="Four refiners is one trade, not four.")
+            max_per_sector = st.number_input("Max candidates per sector", 1, 5, 1, 1,
+                                             help="At this position count, two names in a group is one oversized bet.")
     else:
         st.caption("Candidates are generated from a fixed rule set: 21MA pullback in an established uptrend, "
-                   "structural stop, minimum 2:1 reward to the first target, maximum two names per sector.")
+                   "structural stop, minimum 2:1 reward to the first target, one name per sector.")
 
     @st.cache_data(ttl=3600, show_spinner="Scanning the universe...")
     def get_universe_ohlc(tickers, end_str):
