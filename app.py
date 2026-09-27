@@ -1506,9 +1506,11 @@ elif page_selection == "Weekly Recap":
     def trend_character(tkr):
         """Where a name sits against its own moving averages, and how stretched it is.
 
-        A big weekly move says nothing about whether it is a good entry. A name 12%
-        above its 21MA is extended whatever the board says; one that just reclaimed
-        the 21MA is a setup. Returns (label, colour, extension %) or None.
+        A weekly percentage says nothing about whether a name is a good entry. The
+        labels below are directional: a name in a clean downtrend is a different
+        proposition from one that has already fallen 15% below its 21MA, just as a
+        continuation long differs from a name that is badly extended. Returns
+        (label, colour, extension %) or None.
         """
         if hist is None or tkr not in hist.columns:
             return None
@@ -1520,20 +1522,36 @@ elif page_selection == "Weekly Recap":
         s50 = s.rolling(50).mean()
         px = float(s.iloc[-1])
         ext = (px / float(e21.iloc[-1]) - 1.0) * 100.0
+
         above8 = px > float(e8.iloc[-1])
         above21 = px > float(e21.iloc[-1])
-        above50 = px > float(s50.iloc[-1]) if pd.notna(s50.iloc[-1]) else False
-        # was it under the 21 in the last week, and is it back above now?
-        recent_below = bool((s.iloc[-6:-1] < e21.iloc[-6:-1]).any())
+        above50 = pd.notna(s50.iloc[-1]) and px > float(s50.iloc[-1])
+        was_below21 = bool((s.iloc[-6:-1] < e21.iloc[-6:-1]).any())
+        was_above21 = bool((s.iloc[-6:-1] > e21.iloc[-6:-1]).any())
 
-        if not above50:
-            return ("Below 50MA", RED, ext)
+        # ---- uptrend: above all three ----
         if above8 and above21 and above50:
-            if recent_below:
+            if was_below21:
                 return ("Reclaim", BLUE, ext)
-            if abs(ext) >= 8.0:
+            if ext >= 12.0:
+                return ("Very extended", RED, ext)
+            if ext >= 8.0:
                 return ("Extended", AMBER, ext)
             return ("Continuation", GREEN, ext)
+
+        # ---- downtrend: below all three ----
+        if (not above8) and (not above21) and (not above50):
+            if was_above21:
+                return ("Fresh breakdown", RED, ext)
+            if ext <= -12.0:
+                return ("Very extended down", BLUE, ext)
+            if ext <= -8.0:
+                return ("Extended down", AMBER, ext)
+            return ("Downtrend", RED, ext)
+
+        # ---- in between ----
+        if (not above50) and above21:
+            return ("Bouncing", AMBER, ext)      # counter-trend rally inside a downtrend
         if above50 and not above21:
             return ("Losing the 21MA", AMBER, ext)
         return ("Mixed", MUTED, ext)
