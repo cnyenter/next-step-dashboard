@@ -1887,7 +1887,7 @@ elif page_selection == "Swing Screener":
 
     # Defaults that the public view always uses
     direction, risk_pct, min_rr, max_ext, min_dv, req_rs = "Long", 1.5, 2.0, 6.0, 20.0, True
-    pos_cap, max_per_sector = 15.0, 1
+    pos_cap, max_per_sector, max_atr = 15.0, 1, 15.0
 
     if operator:
         c1, c2, c3 = st.columns(3)
@@ -1907,9 +1907,12 @@ elif page_selection == "Swing Screener":
         with c5:
             max_per_sector = st.number_input("Max candidates per sector", 1, 5, 1, 1,
                                              help="At this position count, two names in a group is one oversized bet.")
+        max_atr = st.number_input("Max average daily ranges to T1", 4.0, 60.0, 15.0, 1.0,
+                                  help="One ATR is roughly one session of movement, so 15 is about three weeks. "
+                                       "A structurally valid target that sits 40 ATRs away is a position trade, not a swing.")
     else:
         st.caption("Candidates are generated from a fixed rule set: 21MA pullback in an established uptrend, "
-                   "structural stop, minimum 2:1 reward to the first target, one name per sector.")
+                   "structural stop, minimum 2:1 reward to the first target, a target reachable inside a swing timeframe, one name per sector.")
 
     @st.cache_data(ttl=3600, show_spinner="Scanning the universe...")
     def get_universe_ohlc(tickers, end_str):
@@ -1961,6 +1964,13 @@ elif page_selection == "Swing Screener":
         e21 = c.ewm(span=21, adjust=False).mean()
         s50 = c.rolling(50).mean()
         if pd.isna(s50.iloc[-1]):
+            return None
+        # Average true range: one ATR is roughly one session of movement, so the
+        # distance to a target in ATRs is an estimate of how long it would take.
+        pc = c.shift(1)
+        tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+        atr = float(tr.tail(14).mean())
+        if not atr or pd.isna(atr) or atr <= 0:
             return None
         m21, m50 = float(e21.iloc[-1]), float(s50.iloc[-1])
         ext = (px / m21 - 1.0) * 100.0
@@ -2016,10 +2026,13 @@ elif page_selection == "Swing Screener":
 
         if rr < min_rr:
             return None
+        atr_t1 = abs(tg[0] - px) / atr
+        if atr_t1 > max_atr:
+            return None
         raw_size = risk_pct / (risk / px * 100.0) * 100.0
         return dict(t=t, sec=UNIVERSE_SECTORS.get(t, "Other"), px=px, stop=stop, tg=tg, rr=rr,
-                    ext=ext, rs=rs, raw=raw_size, size=min(raw_size, pos_cap),
-                    capped=raw_size > pos_cap)
+                    ext=ext, rs=rs, atr=atr, atr_t1=atr_t1, raw=raw_size,
+                    size=min(raw_size, pos_cap), capped=raw_size > pos_cap)
 
     want_long = (direction == "Long")
     hits = []
@@ -2066,13 +2079,16 @@ elif page_selection == "Swing Screener":
                      "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:,.2f}".format(t3) if t3 else "—") + "</td>"
                      "<td style='text-align:right;font-weight:700;color:" + AMBER + ";'>" + "{:.1f}".format(r["rr"]) + "</td>"
                      "<td style='text-align:right;'>" + sz + "</td>"
-                     "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(r["ext"]) + "</td></tr>")
+                     "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(r["ext"]) + "</td>"
+                     "<td style='text-align:right;color:" + (AMBER if r["atr_t1"] > 20 else MUTED) + ";'>"
+                     + "{:.0f}".format(r["atr_t1"]) + "</td></tr>")
         st.markdown("<table class='ns-tbl'><tr>"
                     "<th style='text-align:left;'>Ticker</th><th style='text-align:left;'>Sector</th>"
                     "<th style='text-align:right;'>Entry</th><th style='text-align:right;'>Stop</th>"
                     "<th style='text-align:right;'>T1</th><th style='text-align:right;'>T2</th>"
                     "<th style='text-align:right;'>T3</th><th style='text-align:right;'>R:R</th>"
                     "<th style='text-align:right;'>Size</th><th style='text-align:right;'>vs 21MA</th>"
+                    "<th style='text-align:right;'>ATRs to T1</th>"
                     "</tr>" + rows + "</table>", unsafe_allow_html=True)
 
         risk_total = sum(r["size"] / 100.0 * (abs(r["px"] - r["stop"]) / r["px"]) * 100.0 for r in chosen)
@@ -2101,7 +2117,9 @@ elif page_selection == "Swing Screener":
                     "earns a small position, which keeps risk constant instead of letting the stop distance set it. "
                     "An asterisk means the risk math justified more but the position cap applied. <strong>Stops</strong> "
                     "sit under the swing low that produced the pullback; <strong>targets</strong> are prior pivot highs, "
-                    "or fib extensions where price is in blue sky.</span></div>", unsafe_allow_html=True)
+                    "or fib extensions where price is in blue sky. <strong>ATRs to T1</strong> is the distance to the first "
+                    "target measured in average daily ranges, which is roughly the number of sessions it would take: "
+                    "a $75 target on a volatile $400 stock can be nearer in practice than a $20 target on a quiet one.</span></div>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
                 "A screen is a starting point, not a trade list. Check earnings dates before entering anything. "
