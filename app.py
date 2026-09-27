@@ -1784,53 +1784,135 @@ elif page_selection == "Weekly Recap":
 # ==========================================
 elif page_selection == "Swing Screener":
 
-    st.title("Next Step Trading: Swing Screener")
+    st.title("Next Step Trading: Swing Candidates")
     st.markdown("<p style='color:" + MUTED + "; font-size:15px;'>The daily-chart version of the intraday method: "
                 "a pullback into the 21MA inside an established trend, a look below and fail, a structural stop, "
-                "and targets at real levels. Nothing passes without the reward paying for the risk.</p>",
+                "and targets at real levels. Nothing is listed unless the reward pays for the risk.</p>",
                 unsafe_allow_html=True)
 
-    # ── Universe. Liquid US names; edit freely, the screener only needs tickers. ──
-    UNIVERSE = [
-        "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX","ADBE","CRM","ORCL","CSCO",
-        "INTC","QCOM","TXN","AMAT","MU","LRCX","KLAC","ADI","SNPS","CDNS","MRVL","NXPI","ON","MCHP","SMCI",
-        "PLTR","SNOW","NOW","PANW","CRWD","ZS","DDOG","NET","MDB","TEAM","WDAY","INTU","ADSK","ANSS",
-        "IBM","ACN","INFY","HPQ","DELL","WDC","STX","APH","GLW","KEYS","TER","SWKS","QRVO",
-        "JPM","BAC","WFC","GS","MS","C","USB","PNC","TFC","SCHW","BLK","BX","KKR","APO","AXP","V","MA",
-        "PYPL","FI","COF","DFS","SYF","ICE","CME","SPGI","MCO","MSCI","NDAQ","TROW","BEN","AMP",
-        "UNH","JNJ","LLY","PFE","MRK","ABBV","BMY","AMGN","GILD","BIIB","VRTX","REGN","MRNA","ZTS",
-        "TMO","DHR","ABT","SYK","BSX","MDT","EW","ISRG","HCA","CI","CVS","ELV","MCK","COR","BDX",
-        "XOM","CVX","COP","EOG","SLB","HAL","OXY","PSX","VLO","MPC","KMI","WMB","OKE","DVN","FANG","HES",
-        "BKR","TRGP","LNG","EQT","CTRA","APA","MRO","DINO",
-        "CAT","DE","BA","GE","HON","MMM","LMT","RTX","NOC","GD","EMR","ETN","PH","ITW","CMI","PCAR",
-        "UNP","CSX","NSC","UPS","FDX","DAL","UAL","LUV","WM","RSG","URI","FAST","GWW","ROK","DOV",
-        "WMT","COST","TGT","HD","LOW","DG","DLTR","KR","SYY","PG","KO","PEP","PM","MO","MDLZ","KHC",
-        "GIS","K","HSY","STZ","KDP","MNST","CL","KMB","EL","CHD","CLX",
-        "MCD","SBUX","CMG","YUM","DRI","MAR","HLT","BKNG","ABNB","LVS","MGM","RCL","CCL","NCLH",
-        "NKE","LULU","TJX","ROST","ORLY","AZO","GM","F","APTV","LEN","DHI","PHM","NVR",
-        "DIS","CMCSA","T","VZ","TMUS","CHTR","WBD","PARA","EA","TTWO","RBLX","SPOT","UBER","LYFT","DASH",
-        "LIN","APD","SHW","ECL","FCX","NEM","NUE","STLD","DOW","DD","PPG","VMC","MLM","ALB","CF","MOS",
-        "NEE","DUK","SO","D","AEP","EXC","SRE","XEL","ED","PEG","WEC","ES","PCG","VST","CEG",
-        "AMT","PLD","CCI","EQIX","PSA","SPG","O","WELL","DLR","VICI","AVB","EQR",
-    ]
+    UNIVERSE_SECTORS = {
+        # semis
+        "NVDA":"Semiconductors","AVGO":"Semiconductors","AMD":"Semiconductors","QCOM":"Semiconductors",
+        "TXN":"Semiconductors","AMAT":"Semiconductors","MU":"Semiconductors","LRCX":"Semiconductors",
+        "KLAC":"Semiconductors","ADI":"Semiconductors","MRVL":"Semiconductors","NXPI":"Semiconductors",
+        "ON":"Semiconductors","MCHP":"Semiconductors","INTC":"Semiconductors","SWKS":"Semiconductors",
+        "QRVO":"Semiconductors","TER":"Semiconductors","SMCI":"Semiconductors",
+        # software
+        "MSFT":"Software","ADBE":"Software","CRM":"Software","ORCL":"Software","NOW":"Software",
+        "PANW":"Software","CRWD":"Software","ZS":"Software","DDOG":"Software","NET":"Software",
+        "MDB":"Software","TEAM":"Software","WDAY":"Software","INTU":"Software","ADSK":"Software",
+        "ANSS":"Software","SNPS":"Software","CDNS":"Software","SNOW":"Software","PLTR":"Software",
+        # hardware / IT services
+        "AAPL":"Tech Hardware","CSCO":"Tech Hardware","IBM":"Tech Hardware","ACN":"Tech Hardware",
+        "INFY":"Tech Hardware","HPQ":"Tech Hardware","DELL":"Tech Hardware","WDC":"Tech Hardware",
+        "STX":"Tech Hardware","APH":"Tech Hardware","GLW":"Tech Hardware","KEYS":"Tech Hardware",
+        # internet / media
+        "GOOGL":"Internet & Media","META":"Internet & Media","NFLX":"Internet & Media","DIS":"Internet & Media",
+        "CMCSA":"Internet & Media","CHTR":"Internet & Media","WBD":"Internet & Media","PARA":"Internet & Media",
+        "EA":"Internet & Media","TTWO":"Internet & Media","RBLX":"Internet & Media","SPOT":"Internet & Media",
+        "UBER":"Internet & Media","LYFT":"Internet & Media","DASH":"Internet & Media","ABNB":"Internet & Media",
+        "BKNG":"Internet & Media",
+        "T":"Telecom","VZ":"Telecom","TMUS":"Telecom",
+        # financials
+        "JPM":"Banks","BAC":"Banks","WFC":"Banks","C":"Banks","USB":"Banks","PNC":"Banks","TFC":"Banks",
+        "COF":"Banks","DFS":"Banks","SYF":"Banks",
+        "GS":"Capital Markets","MS":"Capital Markets","SCHW":"Capital Markets","BLK":"Capital Markets",
+        "BX":"Capital Markets","KKR":"Capital Markets","APO":"Capital Markets","TROW":"Capital Markets",
+        "BEN":"Capital Markets","AMP":"Capital Markets","ICE":"Capital Markets","CME":"Capital Markets",
+        "NDAQ":"Capital Markets","MSCI":"Capital Markets","SPGI":"Capital Markets","MCO":"Capital Markets",
+        "V":"Payments","MA":"Payments","AXP":"Payments","PYPL":"Payments","FI":"Payments",
+        # healthcare
+        "JNJ":"Pharma","LLY":"Pharma","PFE":"Pharma","MRK":"Pharma","ABBV":"Pharma","BMY":"Pharma","ZTS":"Pharma",
+        "AMGN":"Biotech","GILD":"Biotech","BIIB":"Biotech","VRTX":"Biotech","REGN":"Biotech","MRNA":"Biotech",
+        "TMO":"Medical Devices","DHR":"Medical Devices","ABT":"Medical Devices","SYK":"Medical Devices",
+        "BSX":"Medical Devices","MDT":"Medical Devices","EW":"Medical Devices","ISRG":"Medical Devices",
+        "BDX":"Medical Devices",
+        "UNH":"Healthcare Services","HCA":"Healthcare Services","CI":"Healthcare Services","CVS":"Healthcare Services",
+        "ELV":"Healthcare Services","MCK":"Healthcare Services","COR":"Healthcare Services",
+        # energy, split so refiners cannot stack
+        "VLO":"Refiners","MPC":"Refiners","PSX":"Refiners","DINO":"Refiners",
+        "XOM":"Oil & Gas","CVX":"Oil & Gas","COP":"Oil & Gas","EOG":"Oil & Gas","OXY":"Oil & Gas",
+        "DVN":"Oil & Gas","FANG":"Oil & Gas","HES":"Oil & Gas","APA":"Oil & Gas","MRO":"Oil & Gas",
+        "CTRA":"Oil & Gas","EQT":"Oil & Gas",
+        "SLB":"Oil Services","HAL":"Oil Services","BKR":"Oil Services",
+        "KMI":"Midstream","WMB":"Midstream","OKE":"Midstream","TRGP":"Midstream","LNG":"Midstream",
+        # industrials
+        "CAT":"Industrials","DE":"Industrials","HON":"Industrials","MMM":"Industrials","EMR":"Industrials",
+        "ETN":"Industrials","PH":"Industrials","ITW":"Industrials","CMI":"Industrials","PCAR":"Industrials",
+        "URI":"Industrials","FAST":"Industrials","GWW":"Industrials","ROK":"Industrials","DOV":"Industrials",
+        "GE":"Industrials",
+        "BA":"Aerospace & Defense","LMT":"Aerospace & Defense","RTX":"Aerospace & Defense",
+        "NOC":"Aerospace & Defense","GD":"Aerospace & Defense",
+        "UNP":"Transports","CSX":"Transports","NSC":"Transports","UPS":"Transports","FDX":"Transports",
+        "DAL":"Transports","UAL":"Transports","LUV":"Transports",
+        "WM":"Waste","RSG":"Waste",
+        # consumer
+        "WMT":"Retail","COST":"Retail","TGT":"Retail","HD":"Retail","LOW":"Retail","DG":"Retail",
+        "DLTR":"Retail","KR":"Retail","TJX":"Retail","ROST":"Retail","ORLY":"Retail","AZO":"Retail",
+        "NKE":"Retail","LULU":"Retail",
+        "PG":"Staples","KO":"Staples","PEP":"Staples","PM":"Staples","MO":"Staples","MDLZ":"Staples",
+        "KHC":"Staples","GIS":"Staples","K":"Staples","HSY":"Staples","STZ":"Staples","KDP":"Staples",
+        "MNST":"Staples","CL":"Staples","KMB":"Staples","EL":"Staples","CHD":"Staples","CLX":"Staples",
+        "SYY":"Staples",
+        "MCD":"Restaurants & Travel","SBUX":"Restaurants & Travel","CMG":"Restaurants & Travel",
+        "YUM":"Restaurants & Travel","DRI":"Restaurants & Travel","MAR":"Restaurants & Travel",
+        "HLT":"Restaurants & Travel","LVS":"Restaurants & Travel","MGM":"Restaurants & Travel",
+        "RCL":"Restaurants & Travel","CCL":"Restaurants & Travel","NCLH":"Restaurants & Travel",
+        "GM":"Autos & Housing","F":"Autos & Housing","APTV":"Autos & Housing","LEN":"Autos & Housing",
+        "DHI":"Autos & Housing","PHM":"Autos & Housing","NVR":"Autos & Housing",
+        "AMZN":"Consumer Discretionary","TSLA":"Consumer Discretionary",
+        # materials, utilities, real estate
+        "LIN":"Materials","APD":"Materials","SHW":"Materials","ECL":"Materials","FCX":"Materials",
+        "NEM":"Materials","NUE":"Materials","STLD":"Materials","VMC":"Materials","MLM":"Materials",
+        "DOW":"Chemicals","DD":"Chemicals","PPG":"Chemicals","ALB":"Chemicals","CF":"Chemicals","MOS":"Chemicals",
+        "NEE":"Utilities","DUK":"Utilities","SO":"Utilities","D":"Utilities","AEP":"Utilities","EXC":"Utilities",
+        "SRE":"Utilities","XEL":"Utilities","ED":"Utilities","PEG":"Utilities","WEC":"Utilities","ES":"Utilities",
+        "PCG":"Utilities","VST":"Utilities","CEG":"Utilities",
+        "AMT":"REITs","PLD":"REITs","CCI":"REITs","EQIX":"REITs","PSA":"REITs","SPG":"REITs","O":"REITs",
+        "WELL":"REITs","DLR":"REITs","VICI":"REITs","AVB":"REITs","EQR":"REITs",
+    }
+    UNIVERSE = sorted(UNIVERSE_SECTORS.keys())
 
-    # ── Controls ──
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        direction = st.radio("Setups", ["Long", "Short"], horizontal=True)
-        risk_pct = st.number_input("Risk per trade (% of book)", 0.25, 5.0, 1.5, 0.25)
-    with c2:
-        min_rr = st.number_input("Minimum R:R to T1", 1.0, 5.0, 2.0, 0.25,
-                                 help="Nothing appears unless the first target pays at least this multiple of the stop.")
-        max_ext = st.number_input("Max distance from 21MA (%)", 2.0, 20.0, 6.0, 0.5,
-                                  help="Keeps extended names out. A big move is not an entry.")
-    with c3:
-        min_dv = st.number_input("Min average dollar volume ($M)", 1.0, 500.0, 20.0, 5.0)
-        req_rs = st.checkbox("Require relative strength vs SPX (3 months)", value=True)
+    # ── Operator controls are hidden unless the passcode matches ──
+    try:
+        _code = st.secrets.get("SCREENER_PASSCODE", None)
+    except Exception:
+        _code = None
+    if _code:
+        _entered = st.sidebar.text_input("Operator passcode", type="password", key="scr_pass")
+        operator = (_entered == _code)
+    else:
+        operator = False
+        st.sidebar.caption("Screener controls are locked. Add SCREENER_PASSCODE to the app secrets to unlock them.")
+
+    # Defaults that the public view always uses
+    direction, risk_pct, min_rr, max_ext, min_dv, req_rs = "Long", 1.5, 2.0, 6.0, 20.0, True
+    pos_cap, max_per_sector = 20.0, 2
+
+    if operator:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            direction = st.radio("Setups", ["Long", "Short"], horizontal=True)
+            risk_pct = st.number_input("Risk per trade (% of book)", 0.25, 5.0, 1.5, 0.25)
+        with c2:
+            min_rr = st.number_input("Minimum R:R to T1", 1.0, 5.0, 2.0, 0.25)
+            max_ext = st.number_input("Max distance from 21MA (%)", 2.0, 20.0, 6.0, 0.5)
+        with c3:
+            min_dv = st.number_input("Min average dollar volume ($M)", 1.0, 500.0, 20.0, 5.0)
+            req_rs = st.checkbox("Require relative strength vs SPX (3 months)", value=True)
+        c4, c5 = st.columns(2)
+        with c4:
+            pos_cap = st.number_input("Max position size (% of book)", 5.0, 50.0, 20.0, 2.5,
+                                      help="A tight stop can justify an enormous position on paper. It cannot protect against a gap.")
+        with c5:
+            max_per_sector = st.number_input("Max candidates per sector", 1, 5, 2, 1,
+                                             help="Four refiners is one trade, not four.")
+    else:
+        st.caption("Candidates are generated from a fixed rule set: 21MA pullback in an established uptrend, "
+                   "structural stop, minimum 2:1 reward to the first target, maximum two names per sector.")
 
     @st.cache_data(ttl=3600, show_spinner="Scanning the universe...")
     def get_universe_ohlc(tickers, end_str):
-        """Daily OHLCV for the whole universe, fetched in chunks to stay under rate limits."""
         start = (pd.Timestamp(end_str) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
         out = {}
         tl = list(tickers)
@@ -1846,12 +1928,7 @@ elif page_selection == "Swing Screener":
                 continue
             for t in chunk:
                 try:
-                    if isinstance(data.columns, pd.MultiIndex):
-                        if t not in data.columns.get_level_values(0):
-                            continue
-                        df = data[t]
-                    else:
-                        df = data
+                    df = data[t] if isinstance(data.columns, pd.MultiIndex) else data
                     df = df.dropna(subset=["Close"])
                     if len(df) > 120:
                         out[t] = df
@@ -1861,12 +1938,10 @@ elif page_selection == "Swing Screener":
 
     end_str = (pd.Timestamp.now().normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     data = get_universe_ohlc(tuple(UNIVERSE), end_str)
-
     if not data:
         st.warning("Market data could not be loaded right now. Wait a moment and reload.")
         st.stop()
 
-    # SPX benchmark for the relative strength test
     spx_3m = None
     try:
         sx = fetch_history("^SPX", period="6mo", interval="1d")
@@ -1875,161 +1950,158 @@ elif page_selection == "Swing Screener":
     except Exception:
         pass
 
-    def pivots(series, left_right=5, want_high=True):
-        """Local extremes: a bar that is the highest (or lowest) of the bars either side."""
-        w = left_right * 2 + 1
+    def pivots(series, lr=5, want_high=True):
+        w = lr * 2 + 1
         roll = series.rolling(w, center=True).max() if want_high else series.rolling(w, center=True).min()
         return series[(series == roll)].dropna()
 
-    def scan_long(t, df):
+    def scan(t, df, want_long):
         c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
         px = float(c.iloc[-1])
-        e8, e21 = c.ewm(span=8, adjust=False).mean(), c.ewm(span=21, adjust=False).mean()
+        e21 = c.ewm(span=21, adjust=False).mean()
         s50 = c.rolling(50).mean()
         if pd.isna(s50.iloc[-1]):
             return None
-
-        # 1. established uptrend
-        if not (px > float(e21.iloc[-1]) and float(e21.iloc[-1]) > float(s50.iloc[-1]) and px > float(s50.iloc[-1])):
-            return None
-        # 2. not extended
-        ext = (px / float(e21.iloc[-1]) - 1.0) * 100.0
-        if ext > max_ext:
-            return None
-        # 3. the setup: dipped below the 21MA in the last 5 sessions and closed back above
-        recent = df.iloc[-5:]
-        swept = bool((recent["Low"] < e21.iloc[-5:]).any())
-        if not (swept and px > float(e21.iloc[-1])):
-            return None
-        # 4. liquidity
-        dv = float((c * v).tail(20).mean()) / 1e6
-        if dv < min_dv:
-            return None
-        # 5. relative strength
-        rs = (px / float(c.iloc[-64]) - 1.0) * 100.0 if len(c) > 64 else None
-        if req_rs and (rs is None or spx_3m is None or rs <= spx_3m):
-            return None
-
-        # structural stop: under the swing low that produced the pullback
-        stop = float(l.tail(10).min()) * 0.995
-        if stop >= px:
-            return None
-        risk = px - stop
-
-        # structural targets: pivot highs above price, else fib extension in blue sky
-        ph = pivots(h.tail(160), 5, True)
-        above = sorted([float(x) for x in ph.values if x > px * 1.005])
-        tg = above[:3]
-        if len(tg) < 3:
-            lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
-            rng = max(hi60 - lo60, px * 0.02)
-            for m in (1.272, 1.618, 2.0):
-                cand = lo60 + rng * m
-                if cand > px * 1.005 and all(abs(cand - x) > px * 0.005 for x in tg):
-                    tg.append(cand)
-            tg = sorted(tg)[:3]
-        if not tg:
-            return None
-
-        rr = (tg[0] - px) / risk
-        if rr < min_rr:
-            return None
-        return dict(t=t, px=px, stop=stop, tg=tg, rr=rr, ext=ext, rs=rs, dv=dv,
-                    size=risk_pct / (risk / px * 100.0) * 100.0)
-
-    def scan_short(t, df):
-        c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
-        px = float(c.iloc[-1])
-        e8, e21 = c.ewm(span=8, adjust=False).mean(), c.ewm(span=21, adjust=False).mean()
-        s50 = c.rolling(50).mean()
-        if pd.isna(s50.iloc[-1]):
-            return None
-        if not (px < float(e21.iloc[-1]) and float(e21.iloc[-1]) < float(s50.iloc[-1]) and px < float(s50.iloc[-1])):
-            return None
-        ext = (px / float(e21.iloc[-1]) - 1.0) * 100.0
-        if abs(ext) > max_ext:
-            return None
-        recent = df.iloc[-5:]
-        poked = bool((recent["High"] > e21.iloc[-5:]).any())
-        if not (poked and px < float(e21.iloc[-1])):
-            return None
+        m21, m50 = float(e21.iloc[-1]), float(s50.iloc[-1])
+        ext = (px / m21 - 1.0) * 100.0
         dv = float((c * v).tail(20).mean()) / 1e6
         if dv < min_dv:
             return None
         rs = (px / float(c.iloc[-64]) - 1.0) * 100.0 if len(c) > 64 else None
-        if req_rs and (rs is None or spx_3m is None or rs >= spx_3m):
-            return None
 
-        stop = float(h.tail(10).max()) * 1.005
-        if stop <= px:
-            return None
-        risk = stop - px
+        if want_long:
+            if not (px > m21 > m50 and px > m50):
+                return None
+            if ext > max_ext:
+                return None
+            if not bool((df["Low"].iloc[-5:] < e21.iloc[-5:]).any()):
+                return None
+            if req_rs and (rs is None or spx_3m is None or rs <= spx_3m):
+                return None
+            stop = float(l.tail(10).min()) * 0.995
+            if stop >= px:
+                return None
+            risk = px - stop
+            tg = sorted([float(x) for x in pivots(h.tail(160), 5, True).values if x > px * 1.005])[:3]
+            if len(tg) < 3:
+                lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
+                rng = max(hi60 - lo60, px * 0.02)
+                tg += [lo60 + rng * m for m in (1.272, 1.618, 2.0) if lo60 + rng * m > px * 1.005]
+                tg = sorted(set(round(x, 2) for x in tg))[:3]
+            if not tg:
+                return None
+            rr = (tg[0] - px) / risk
+        else:
+            if not (px < m21 < m50 and px < m50):
+                return None
+            if abs(ext) > max_ext:
+                return None
+            if not bool((df["High"].iloc[-5:] > e21.iloc[-5:]).any()):
+                return None
+            if req_rs and (rs is None or spx_3m is None or rs >= spx_3m):
+                return None
+            stop = float(h.tail(10).max()) * 1.005
+            if stop <= px:
+                return None
+            risk = stop - px
+            tg = sorted([float(x) for x in pivots(l.tail(160), 5, False).values if x < px * 0.995], reverse=True)[:3]
+            if len(tg) < 3:
+                lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
+                rng = max(hi60 - lo60, px * 0.02)
+                tg += [hi60 - rng * m for m in (1.272, 1.618, 2.0) if 0 < hi60 - rng * m < px * 0.995]
+                tg = sorted(set(round(x, 2) for x in tg), reverse=True)[:3]
+            if not tg:
+                return None
+            rr = (px - tg[0]) / risk
 
-        pl = pivots(l.tail(160), 5, False)
-        below = sorted([float(x) for x in pl.values if x < px * 0.995], reverse=True)
-        tg = below[:3]
-        if len(tg) < 3:
-            lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
-            rng = max(hi60 - lo60, px * 0.02)
-            for m in (1.272, 1.618, 2.0):
-                cand = hi60 - rng * m
-                if cand < px * 0.995 and cand > 0 and all(abs(cand - x) > px * 0.005 for x in tg):
-                    tg.append(cand)
-            tg = sorted(tg, reverse=True)[:3]
-        if not tg:
-            return None
-
-        rr = (px - tg[0]) / risk
         if rr < min_rr:
             return None
-        return dict(t=t, px=px, stop=stop, tg=tg, rr=rr, ext=ext, rs=rs, dv=dv,
-                    size=risk_pct / (risk / px * 100.0) * 100.0)
+        raw_size = risk_pct / (risk / px * 100.0) * 100.0
+        return dict(t=t, sec=UNIVERSE_SECTORS.get(t, "Other"), px=px, stop=stop, tg=tg, rr=rr,
+                    ext=ext, rs=rs, raw=raw_size, size=min(raw_size, pos_cap),
+                    capped=raw_size > pos_cap)
 
+    want_long = (direction == "Long")
     hits = []
     for t, df in data.items():
         try:
-            r = scan_long(t, df) if direction == "Long" else scan_short(t, df)
+            r = scan(t, df, want_long)
             if r:
                 hits.append(r)
         except Exception:
             continue
     hits.sort(key=lambda r: -r["rr"])
 
-    st.caption("Scanned %d names. %d passed every filter." % (len(data), len(hits)))
+    # Concentration control: best R:R per sector first, then allocation budget
+    chosen, per_sec, alloc, dropped = [], {}, 0.0, []
+    for r in hits:
+        if per_sec.get(r["sec"], 0) >= max_per_sector:
+            dropped.append(r)
+            continue
+        if alloc + r["size"] > 100.0:
+            r = dict(r, size=max(0.0, 100.0 - alloc))
+            if r["size"] < 2.0:
+                break
+        per_sec[r["sec"]] = per_sec.get(r["sec"], 0) + 1
+        alloc += r["size"]
+        chosen.append(r)
 
-    if not hits:
-        st.info("Nothing qualifies today. That is a valid result: in a market with no clean pullbacks, "
+    st.caption("Scanned %d names. %d passed the setup and R:R filters; %d shown after the sector limit."
+               % (len(data), len(hits), len(chosen)))
+
+    if not chosen:
+        st.info("Nothing qualifies today. That is a valid result: with no clean pullbacks on offer, "
                 "the honest answer is no trade rather than a lower bar.")
     else:
         rows = ""
-        for r in hits[:15]:
+        for r in chosen:
             t1, t2, t3 = (list(r["tg"]) + [None, None, None])[:3]
+            sz = "{:.1f}%".format(r["size"]) + ("*" if r["capped"] else "")
             rows += ("<tr><td style='font-weight:700;'>" + r["t"] + "</td>"
+                     "<td style='color:" + MUTED + ";'>" + r["sec"] + "</td>"
                      "<td style='text-align:right;'>" + "{:,.2f}".format(r["px"]) + "</td>"
                      "<td style='text-align:right;color:" + RED + ";'>" + "{:,.2f}".format(r["stop"]) + "</td>"
                      "<td style='text-align:right;color:" + GREEN + ";'>" + "{:,.2f}".format(t1) + "</td>"
                      "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:,.2f}".format(t2) if t2 else "—") + "</td>"
                      "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:,.2f}".format(t3) if t3 else "—") + "</td>"
                      "<td style='text-align:right;font-weight:700;color:" + AMBER + ";'>" + "{:.1f}".format(r["rr"]) + "</td>"
-                     "<td style='text-align:right;'>" + "{:.1f}%".format(r["size"]) + "</td>"
-                     "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(r["ext"]) + "</td>"
-                     "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:+.0f}%".format(r["rs"]) if r["rs"] is not None else "—") + "</td></tr>")
+                     "<td style='text-align:right;'>" + sz + "</td>"
+                     "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(r["ext"]) + "</td></tr>")
         st.markdown("<table class='ns-tbl'><tr>"
-                    "<th style='text-align:left;'>Ticker</th><th style='text-align:right;'>Entry</th>"
-                    "<th style='text-align:right;'>Stop</th><th style='text-align:right;'>T1</th>"
-                    "<th style='text-align:right;'>T2</th><th style='text-align:right;'>T3</th>"
-                    "<th style='text-align:right;'>R:R</th><th style='text-align:right;'>Size</th>"
-                    "<th style='text-align:right;'>vs 21MA</th><th style='text-align:right;'>3mo RS</th>"
+                    "<th style='text-align:left;'>Ticker</th><th style='text-align:left;'>Sector</th>"
+                    "<th style='text-align:right;'>Entry</th><th style='text-align:right;'>Stop</th>"
+                    "<th style='text-align:right;'>T1</th><th style='text-align:right;'>T2</th>"
+                    "<th style='text-align:right;'>T3</th><th style='text-align:right;'>R:R</th>"
+                    "<th style='text-align:right;'>Size</th><th style='text-align:right;'>vs 21MA</th>"
                     "</tr>" + rows + "</table>", unsafe_allow_html=True)
 
-        st.markdown("<div class='ns-panel' style='margin-top:10px;border-left:3px solid " + BLUE + ";'>"
-                    "<span style='font-size:13.5px;color:#cdd8e4;'><strong>Size</strong> is what the position should be "
-                    "as a percentage of the book so that a stop-out costs exactly "
-                    + "{:.2f}%".format(risk_pct) + " of it. A wide stop earns a small position, which is the "
-                    "mechanism that keeps risk constant instead of letting the stop distance decide it. "
-                    "<strong>Stops</strong> sit under the swing low that produced the pullback; <strong>targets</strong> "
-                    "are prior pivot highs, or fib extensions where price is in blue sky.</span></div>",
-                    unsafe_allow_html=True)
+        risk_total = sum(r["size"] / 100.0 * (abs(r["px"] - r["stop"]) / r["px"]) * 100.0 for r in chosen)
+        alloc_col = GREEN if alloc <= 100 else RED
+        st.markdown("<div class='ns-row' style='margin-top:10px;'>"
+                    + tile("Candidates", str(len(chosen)), "after the sector limit")
+                    + tile("Total Allocation", "{:.0f}%".format(alloc), "of the book if all were taken", alloc_col)
+                    + tile("Total Risk", "{:.1f}%".format(risk_total), "if every stop hit", AMBER)
+                    + tile("Sectors", str(len(per_sec)), "represented")
+                    + "</div>", unsafe_allow_html=True)
+
+        if dropped:
+            bysec = {}
+            for r in dropped:
+                bysec[r["sec"]] = bysec.get(r["sec"], 0) + 1
+            txt = ", ".join("%d more in %s" % (v, k) for k, v in sorted(bysec.items(), key=lambda kv: -kv[1])[:4])
+            st.markdown("<div class='ns-panel' style='margin-top:8px;border-left:3px solid " + MUTED + ";'>"
+                        "<span style='font-size:13px;color:#cdd8e4;'>" + str(len(dropped))
+                        + " qualifying name" + ("" if len(dropped) == 1 else "s")
+                        + " held back by the sector limit (" + txt + "). Names in the same group move together, "
+                          "so taking all of them is one position, not several.</span></div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='ns-panel' style='margin-top:8px;border-left:3px solid " + BLUE + ";'>"
+                    "<span style='font-size:13.5px;color:#cdd8e4;'><strong>Size</strong> is the position as a percentage "
+                    "of the book so that a stop-out costs about " + "{:.2f}%".format(risk_pct) + " of it. A wide stop "
+                    "earns a small position, which keeps risk constant instead of letting the stop distance set it. "
+                    "An asterisk means the risk math justified more but the position cap applied. <strong>Stops</strong> "
+                    "sit under the swing low that produced the pullback; <strong>targets</strong> are prior pivot highs, "
+                    "or fib extensions where price is in blue sky.</span></div>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
                 "A screen is a starting point, not a trade list. Check earnings dates before entering anything. "
