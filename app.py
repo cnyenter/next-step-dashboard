@@ -660,13 +660,77 @@ elif page_selection == "Swing Book":
     open_df = book[book["Status"] == "OPEN"].copy()
     closed_df = book[book["Status"] == "CLOSED"].copy()
 
-    # ---- Closed trade results ----
-    def closed_result(row):
+    # ---- Exit legs: a trade can be scaled out at T1, T2 and a final exit ----
+    def _num(v):
         try:
-            e, x = float(row["Entry"]), float(row["Exit_Price"])
-            return ((x - e) / e * 100.0) if row["Side"] == "Long" else ((e - x) / e * 100.0)
+            if v is None or (isinstance(v, str) and not v.strip()):
+                return None
+            f = float(v)
+            return None if pd.isna(f) else f
         except Exception:
             return None
+
+    def partial_legs(row):
+        """Scale-outs only: [(pct_of_position, price)] for Exit1 and Exit2."""
+        out = []
+        for i in (1, 2):
+            px = _num(row.get("Exit%d_Price" % i))
+            pc = _num(row.get("Exit%d_Pct" % i))
+            if px and pc and pc > 0:
+                out.append((pc, px))
+        return out
+
+    def exit_legs(row):
+        """Every filled leg including the final exit, which takes whatever is left."""
+        legs = partial_legs(row)
+        taken = sum(w for w, _ in legs)
+        final = _num(row.get("Exit_Price"))
+        if final:
+            legs = legs + [(max(0.0, 100.0 - taken), final)]
+        return legs, taken
+
+    def leg_return(entry, price, side):
+        return ((price - entry) / entry * 100.0) if side == "Long" else ((entry - price) / entry * 100.0)
+
+    def blended_result(row, live=None):
+        """Weighted return across filled legs.
+
+        With `live`, the position is still open: realised scale-outs are blended with
+        the unsold remainder marked to the current price.
+        """
+        entry = _num(row.get("Entry"))
+        if not entry:
+            return None
+        side = row.get("Side", "Long")
+        if live is not None:
+            legs = partial_legs(row)
+            rem = max(0.0, 100.0 - sum(w for w, _ in legs))
+            if rem > 0:
+                legs = legs + [(rem, live)]
+        else:
+            legs, _ = exit_legs(row)
+        legs = [(w, p) for w, p in legs if w > 0]
+        if not legs:
+            return None
+        tot = sum(w for w, _ in legs)
+        return sum(leg_return(entry, p, side) * (w / tot) for w, p in legs)
+
+    def _avg_exit_txt(row):
+        legs, _ = exit_legs(row)
+        if not legs:
+            return "—"
+        tot = sum(w for w, _ in legs)
+        avg = sum(p * w for w, p in legs) / tot if tot else legs[-1][1]
+        return "{:,.2f}".format(avg)
+
+    def _legs_txt(row):
+        legs, _ = exit_legs(row)
+        n = len([1 for w, _ in legs if w > 0])
+        return "—" if n <= 1 else str(n)
+
+    # ---- Closed trade results ----
+    def closed_result(row):
+        return blended_result(row)
     if not closed_df.empty:
         closed_df["Result %"] = closed_df.apply(closed_result, axis=1)
         closed_df = closed_df.dropna(subset=["Result %"])
@@ -796,7 +860,8 @@ elif page_selection == "Swing Book":
             side_color = GREEN if is_long else RED
 
             if cur is not None:
-                pnl = (cur - entry) / entry * 100.0 if is_long else (entry - cur) / entry * 100.0
+                _b = blended_result(row, live=cur)
+                pnl = _b if _b is not None else ((cur - entry) / entry * 100.0 if is_long else (entry - cur) / entry * 100.0)
                 pnl_color = GREEN if pnl >= 0 else RED
                 bench = ""
                 d0 = row.get("Date_Opened_dt")
@@ -845,6 +910,11 @@ elif page_selection == "Swing Book":
                 chips += "<span style='border:1px solid #444; color:" + MUTED + "; font-size:10px; padding:2px 8px; border-radius:4px; margin-right:6px;'>" + sector + "</span>"
             if opened:
                 chips += "<span style='border:1px solid #444; color:" + MUTED + "; font-size:10px; padding:2px 8px; border-radius:4px;'>Opened " + opened + "</span>"
+            _taken = sum(w for w, _ in partial_legs(row))
+            if _taken > 0:
+                chips += ("<span style='border:1px solid " + AMBER + "; color:" + AMBER + "; font-size:10px; "
+                          "padding:2px 8px; border-radius:4px; margin-left:6px;'>"
+                          + "{:.0f}% taken".format(_taken) + "</span>")
 
             card = ("<div style='background:" + PANEL + "; border:1px solid " + LINE + "; border-radius:8px; padding:16px 18px; margin-bottom:14px;'>"
                     "<div style='display:flex; align-items:center; flex-wrap:wrap; gap:8px;'>"
@@ -867,7 +937,7 @@ elif page_selection == "Swing Book":
 
         head = ("<tr>"
                 "<th style='text-align:left;'>Ticker</th><th style='text-align:left;'>Side</th>"
-                "<th style='text-align:right;'>Entry</th><th style='text-align:right;'>Exit</th>"
+                "<th style='text-align:right;'>Entry</th><th style='text-align:right;'>Exit</th><th style='text-align:center;'>Legs</th>"
                 "<th style='text-align:left;'>Held</th><th style='text-align:right;'>Result</th>")
         if has_spy:
             head += "<th style='text-align:right;'>SPX</th><th style='text-align:right;'>vs SPX</th>"
@@ -885,7 +955,8 @@ elif page_selection == "Swing Book":
             cells = ("<td style='font-weight:700;'>" + str(r["Ticker"]) + "</td>"
                      "<td style='color:" + MUTED + ";'>" + str(r["Side"]) + "</td>"
                      "<td style='text-align:right;'>" + "{:,.2f}".format(float(r["Entry"])) + "</td>"
-                     "<td style='text-align:right;'>" + "{:,.2f}".format(float(r["Exit_Price"])) + "</td>"
+                     "<td style='text-align:right;'>" + _avg_exit_txt(r) + "</td>"
+                     "<td style='text-align:center;color:" + MUTED + ";'>" + _legs_txt(r) + "</td>"
                      "<td style='color:" + MUTED + ";'>" + held + "</td>"
                      "<td style='text-align:right; font-weight:600; color:" + res_c + ";'>" + "{:+.1f}%".format(res) + "</td>")
             if has_spy:
@@ -1887,7 +1958,8 @@ elif page_selection == "Swing Screener":
 
     # Defaults that the public view always uses
     direction, risk_pct, min_rr, max_ext, min_dv, req_rs = "Long", 1.5, 2.0, 6.0, 20.0, True
-    pos_cap, max_per_sector, max_atr = 15.0, 1, 15.0
+    pos_cap, max_per_sector, max_atr, pullback_win = 15.0, 1, 15.0, 5
+    scale_plan = "50 / 25 / 25"
 
     if operator:
         c1, c2, c3 = st.columns(3)
@@ -1907,6 +1979,13 @@ elif page_selection == "Swing Screener":
         with c5:
             max_per_sector = st.number_input("Max candidates per sector", 1, 5, 1, 1,
                                              help="At this position count, two names in a group is one oversized bet.")
+        pullback_win = st.number_input("Setup must have fired within (sessions)", 3, 15, 5, 1,
+                                       help="How recently price dipped through the 21MA. Widen it to keep setups "
+                                            "on the list longer instead of ageing out after a week.")
+        scale_plan = st.selectbox("Scale-out plan", ["50 / 25 / 25", "All out at T1", "Thirds", "50 / 50 at T2"],
+                                  index=0,
+                                  help="Share of the position taken at T1, T2 and T3. The stop moves to breakeven "
+                                       "once T1 fills, which the modelling showed is worth more than the ratio itself.")
         max_atr = st.number_input("Max average daily ranges to T1", 4.0, 60.0, 15.0, 1.0,
                                   help="One ATR is roughly one session of movement, so 15 is about three weeks. "
                                        "A structurally valid target that sits 40 ATRs away is a position trade, not a swing.")
@@ -1944,6 +2023,29 @@ elif page_selection == "Swing Screener":
     if not data:
         st.warning("Market data could not be loaded right now. Wait a moment and reload.")
         st.stop()
+
+    # While the cash session is open, today's daily bar is unfinished: its close is
+    # just the current price, so entries, stops, R:R and ATR would all drift through
+    # the day. Drop it and work from the last completed session instead, which keeps
+    # this list identical from one close to the next.
+    try:
+        now_et = pd.Timestamp.now(tz="US/Eastern")
+    except Exception:
+        now_et = pd.Timestamp.now()
+    session_live = (now_et.weekday() < 5) and (9 <= now_et.hour < 16)
+    today_d = now_et.normalize().date()
+    if session_live:
+        trimmed = {}
+        for t, df in data.items():
+            if len(df) and df.index[-1].date() == today_d:
+                df = df.iloc[:-1]
+            if len(df) > 120:
+                trimmed[t] = df
+        data = trimmed
+    asof = None
+    for df in data.values():
+        d = df.index[-1].date()
+        asof = d if asof is None or d > asof else asof
 
     spx_3m = None
     try:
@@ -1984,7 +2086,7 @@ elif page_selection == "Swing Screener":
                 return None
             if ext > max_ext:
                 return None
-            if not bool((df["Low"].iloc[-5:] < e21.iloc[-5:]).any()):
+            if not bool((df["Low"].iloc[-int(pullback_win):] < e21.iloc[-int(pullback_win):]).any()):
                 return None
             if req_rs and (rs is None or spx_3m is None or rs <= spx_3m):
                 return None
@@ -2006,7 +2108,7 @@ elif page_selection == "Swing Screener":
                 return None
             if abs(ext) > max_ext:
                 return None
-            if not bool((df["High"].iloc[-5:] > e21.iloc[-5:]).any()):
+            if not bool((df["High"].iloc[-int(pullback_win):] > e21.iloc[-int(pullback_win):]).any()):
                 return None
             if req_rs and (rs is None or spx_3m is None or rs >= spx_3m):
                 return None
@@ -2059,7 +2161,10 @@ elif page_selection == "Swing Screener":
         alloc += r["size"]
         chosen.append(r)
 
-    st.caption("Scanned %d names. %d passed the setup and R:R filters; %d shown after the sector limit."
+    st.caption(("Data through the close of %s. " % asof.strftime("%a %b %d")) if asof else ""
+               + ("The current session is excluded until it settles, so this list will not change during the day. "
+                  if session_live else "")
+               + "Scanned %d names. %d passed the setup and R:R filters; %d shown after the sector limit."
                % (len(data), len(hits), len(chosen)))
 
     if not chosen:
@@ -2070,6 +2175,9 @@ elif page_selection == "Swing Screener":
         for r in chosen:
             t1, t2, t3 = (list(r["tg"]) + [None, None, None])[:3]
             sz = "{:.1f}%".format(r["size"]) + ("*" if r["capped"] else "")
+            _shares = {"50 / 25 / 25": (50, 25, 25), "All out at T1": (100, 0, 0),
+                       "Thirds": (33, 33, 34), "50 / 50 at T2": (50, 50, 0)}[scale_plan]
+            _plan = " / ".join(str(s) + "%" for s in _shares if s > 0)
             rows += ("<tr><td style='font-weight:700;'>" + r["t"] + "</td>"
                      "<td style='color:" + MUTED + ";'>" + r["sec"] + "</td>"
                      "<td style='text-align:right;'>" + "{:,.2f}".format(r["px"]) + "</td>"
@@ -2081,7 +2189,8 @@ elif page_selection == "Swing Screener":
                      "<td style='text-align:right;'>" + sz + "</td>"
                      "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(r["ext"]) + "</td>"
                      "<td style='text-align:right;color:" + (AMBER if r["atr_t1"] > 20 else MUTED) + ";'>"
-                     + "{:.0f}".format(r["atr_t1"]) + "</td></tr>")
+                     + "{:.0f}".format(r["atr_t1"]) + "</td>"
+                     "<td style='text-align:right;color:" + MUTED + ";'>" + _plan + "</td></tr>")
         st.markdown("<table class='ns-tbl'><tr>"
                     "<th style='text-align:left;'>Ticker</th><th style='text-align:left;'>Sector</th>"
                     "<th style='text-align:right;'>Entry</th><th style='text-align:right;'>Stop</th>"
@@ -2089,6 +2198,7 @@ elif page_selection == "Swing Screener":
                     "<th style='text-align:right;'>T3</th><th style='text-align:right;'>R:R</th>"
                     "<th style='text-align:right;'>Size</th><th style='text-align:right;'>vs 21MA</th>"
                     "<th style='text-align:right;'>ATRs to T1</th>"
+                    "<th style='text-align:right;'>Scale out</th>"
                     "</tr>" + rows + "</table>", unsafe_allow_html=True)
 
         risk_total = sum(r["size"] / 100.0 * (abs(r["px"] - r["stop"]) / r["px"]) * 100.0 for r in chosen)
@@ -2119,7 +2229,10 @@ elif page_selection == "Swing Screener":
                     "sit under the swing low that produced the pullback; <strong>targets</strong> are prior pivot highs, "
                     "or fib extensions where price is in blue sky. <strong>ATRs to T1</strong> is the distance to the first "
                     "target measured in average daily ranges, which is roughly the number of sessions it would take: "
-                    "a $75 target on a volatile $400 stock can be nearer in practice than a $20 target on a quiet one.</span></div>", unsafe_allow_html=True)
+                    "a $75 target on a volatile $400 stock can be nearer in practice than a $20 target on a quiet one. "
+                    "<strong>Scale out</strong> is the share of the position taken at T1, T2 and T3. "
+                    "The stop moves to breakeven as soon as T1 fills, which matters more to the result than the "
+                    "ratio does.</span></div>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
                 "A screen is a starting point, not a trade list. Check earnings dates before entering anything. "
