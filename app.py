@@ -2018,6 +2018,27 @@ elif page_selection == "Swing Screener":
                     continue
         return out
 
+    @st.cache_data(ttl=300)
+    def get_open_book(url):
+        """Tickers already held, so a repeat candidate is not mistaken for a new idea."""
+        try:
+            b = pd.read_csv(url).dropna(subset=["Ticker"])
+        except Exception:
+            return {}
+        b["Ticker"] = b["Ticker"].astype(str).str.strip().str.upper()
+        b["Status"] = b["Status"].astype(str).str.strip().str.upper()
+        out = {}
+        for _, r in b[b["Status"] == "OPEN"].iterrows():
+            try:
+                out[r["Ticker"]] = dict(entry=float(r["Entry"]),
+                                        sector=str(r.get("Sector", "") or "").strip(),
+                                        opened=str(r.get("Date_Opened", "") or "").strip())
+            except Exception:
+                continue
+        return out
+
+    open_book = get_open_book(SWING_SHEET_URL)
+
     end_str = (pd.Timestamp.now().normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     data = get_universe_ohlc(tuple(UNIVERSE), end_str)
     if not data:
@@ -2145,19 +2166,30 @@ elif page_selection == "Swing Screener":
                 hits.append(r)
         except Exception:
             continue
-    hits.sort(key=lambda r: -r["rr"])
+    for r in hits:
+        held = open_book.get(r["t"])
+        r["held"] = held is not None
+        r["book_entry"] = held["entry"] if held else None
+    # new ideas first, then held names, each by R:R
+    hits.sort(key=lambda r: (r["held"], -r["rr"]))
 
     # Concentration control: best R:R per sector first, then allocation budget
     chosen, per_sec, alloc, dropped = [], {}, 0.0, []
+    # A name already in the book fills its sector slot: holding MPC means a second
+    # refiner is a bigger bet on the same thing, not a separate idea.
+    for _tk, _info in open_book.items():
+        _s = UNIVERSE_SECTORS.get(_tk) or _info.get("sector") or "Other"
+        per_sec[_s] = per_sec.get(_s, 0) + 1
     for r in hits:
-        if per_sec.get(r["sec"], 0) >= max_per_sector:
+        if (not r["held"]) and per_sec.get(r["sec"], 0) >= max_per_sector:
             dropped.append(r)
             continue
         if alloc + r["size"] > 100.0:
             r = dict(r, size=max(0.0, 100.0 - alloc))
             if r["size"] < 2.0:
                 break
-        per_sec[r["sec"]] = per_sec.get(r["sec"], 0) + 1
+        if not r["held"]:
+            per_sec[r["sec"]] = per_sec.get(r["sec"], 0) + 1
         alloc += r["size"]
         chosen.append(r)
 
@@ -2178,7 +2210,12 @@ elif page_selection == "Swing Screener":
             _shares = {"50 / 25 / 25": (50, 25, 25), "All out at T1": (100, 0, 0),
                        "Thirds": (33, 33, 34), "50 / 50 at T2": (50, 50, 0)}[scale_plan]
             _plan = " / ".join(str(s) + "%" for s in _shares if s > 0)
-            rows += ("<tr><td style='font-weight:700;'>" + r["t"] + "</td>"
+            _mark = ""
+            if r["held"]:
+                _mark = ("<span style='border:1px solid " + AMBER + "; color:" + AMBER + "; font-size:9.5px; "
+                         "font-weight:600; padding:1px 6px; border-radius:4px; margin-left:8px;'>IN BOOK @ "
+                         + "{:,.2f}".format(r["book_entry"]) + "</span>")
+            rows += ("<tr><td style='font-weight:700;'>" + r["t"] + _mark + "</td>"
                      "<td style='color:" + MUTED + ";'>" + r["sec"] + "</td>"
                      "<td style='text-align:right;'>" + "{:,.2f}".format(r["px"]) + "</td>"
                      "<td style='text-align:right;color:" + RED + ";'>" + "{:,.2f}".format(r["stop"]) + "</td>"
@@ -2203,8 +2240,10 @@ elif page_selection == "Swing Screener":
 
         risk_total = sum(r["size"] / 100.0 * (abs(r["px"] - r["stop"]) / r["px"]) * 100.0 for r in chosen)
         alloc_col = GREEN if alloc <= 100 else RED
+        _new = sum(1 for r in chosen if not r["held"])
         st.markdown("<div class='ns-row' style='margin-top:10px;'>"
-                    + tile("Candidates", str(len(chosen)), "after the sector limit")
+                    + tile("New Ideas", str(_new), "%d already in the book" % (len(chosen) - _new),
+                           GREEN if _new else MUTED)
                     + tile("Total Allocation", "{:.0f}%".format(alloc), "of the book if all were taken", alloc_col)
                     + tile("Total Risk", "{:.1f}%".format(risk_total), "if every stop hit", AMBER)
                     + tile("Sectors", str(len(per_sec)), "represented")
@@ -2227,7 +2266,9 @@ elif page_selection == "Swing Screener":
                     "earns a small position, which keeps risk constant instead of letting the stop distance set it. "
                     "An asterisk means the risk math justified more but the position cap applied. <strong>Stops</strong> "
                     "sit under the swing low that produced the pullback; <strong>targets</strong> are prior pivot highs, "
-                    "or fib extensions where price is in blue sky. <strong>ATRs to T1</strong> is the distance to the first "
+                    "or fib extensions where price is in blue sky. A row marked <strong>IN BOOK</strong> is a position you "
+                    "already hold: its entry and targets are recalculated from the latest close, so they will not "
+                    "match your fill. <strong>ATRs to T1</strong> is the distance to the first "
                     "target measured in average daily ranges, which is roughly the number of sessions it would take: "
                     "a $75 target on a volatile $400 stock can be nearer in practice than a $20 target on a quiet one. "
                     "<strong>Scale out</strong> is the share of the position taken at T1, T2 and T3. "
