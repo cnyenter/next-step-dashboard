@@ -1959,6 +1959,7 @@ elif page_selection == "Swing Screener":
     # Defaults that the public view always uses
     direction, risk_pct, min_rr, max_ext, min_dv, req_rs = "Long", 1.5, 2.0, 6.0, 20.0, True
     pos_cap, max_per_sector, max_atr, pullback_win = 15.0, 1, 15.0, 5
+    min_stop_atr = 0.75
     scale_plan = "50 / 25 / 25"
 
     if operator:
@@ -1986,6 +1987,11 @@ elif page_selection == "Swing Screener":
                                   index=0,
                                   help="Share of the position taken at T1, T2 and T3. The stop moves to breakeven "
                                        "once T1 fills, which the modelling showed is worth more than the ratio itself.")
+        min_stop_atr = st.number_input("Minimum stop distance (ATRs)", 0.25, 3.0, 0.75, 0.05,
+                                      help="A stop closer than this gets hit by ordinary noise regardless of whether "
+                                           "the setup is right, and it inflates R:R. Setups whose swing low sits "
+                                           "nearer than this are rejected rather than widened, because a widened stop "
+                                           "is no longer the structural level.")
         max_atr = st.number_input("Max average daily ranges to T1", 4.0, 60.0, 15.0, 1.0,
                                   help="One ATR is roughly one session of movement, so 15 is about three weeks. "
                                        "A structurally valid target that sits 40 ATRs away is a position trade, not a swing.")
@@ -2115,6 +2121,8 @@ elif page_selection == "Swing Screener":
             if stop >= px:
                 return None
             risk = px - stop
+            if risk < atr * min_stop_atr:
+                return None
             tg = sorted([float(x) for x in pivots(h.tail(160), 5, True).values if x > px * 1.005])[:3]
             if len(tg) < 3:
                 lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
@@ -2137,6 +2145,8 @@ elif page_selection == "Swing Screener":
             if stop <= px:
                 return None
             risk = stop - px
+            if risk < atr * min_stop_atr:
+                return None
             tg = sorted([float(x) for x in pivots(l.tail(160), 5, False).values if x < px * 0.995], reverse=True)[:3]
             if len(tg) < 3:
                 lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
@@ -2154,7 +2164,7 @@ elif page_selection == "Swing Screener":
             return None
         raw_size = risk_pct / (risk / px * 100.0) * 100.0
         return dict(t=t, sec=UNIVERSE_SECTORS.get(t, "Other"), px=px, stop=stop, tg=tg, rr=rr,
-                    ext=ext, rs=rs, atr=atr, atr_t1=atr_t1, raw=raw_size,
+                    ext=ext, rs=rs, atr=atr, atr_t1=atr_t1, stop_atr=risk / atr, raw=raw_size,
                     size=min(raw_size, pos_cap), capped=raw_size > pos_cap)
 
     want_long = (direction == "Long")
@@ -2225,6 +2235,8 @@ elif page_selection == "Swing Screener":
                      "<td style='text-align:right;font-weight:700;color:" + AMBER + ";'>" + "{:.1f}".format(r["rr"]) + "</td>"
                      "<td style='text-align:right;'>" + sz + "</td>"
                      "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(r["ext"]) + "</td>"
+                     "<td style='text-align:right;color:" + (AMBER if r["stop_atr"] < 1.0 else MUTED) + ";'>"
+                     + "{:.2f}".format(r["stop_atr"]) + "</td>"
                      "<td style='text-align:right;color:" + (AMBER if r["atr_t1"] > 20 else MUTED) + ";'>"
                      + "{:.0f}".format(r["atr_t1"]) + "</td>"
                      "<td style='text-align:right;color:" + MUTED + ";'>" + _plan + "</td></tr>")
@@ -2234,19 +2246,31 @@ elif page_selection == "Swing Screener":
                     "<th style='text-align:right;'>T1</th><th style='text-align:right;'>T2</th>"
                     "<th style='text-align:right;'>T3</th><th style='text-align:right;'>R:R</th>"
                     "<th style='text-align:right;'>Size</th><th style='text-align:right;'>vs 21MA</th>"
-                    "<th style='text-align:right;'>ATRs to T1</th>"
+                    "<th style='text-align:right;'>Stop ATRs</th><th style='text-align:right;'>ATRs to T1</th>"
                     "<th style='text-align:right;'>Scale out</th>"
                     "</tr>" + rows + "</table>", unsafe_allow_html=True)
 
-        risk_total = sum(r["size"] / 100.0 * (abs(r["px"] - r["stop"]) / r["px"]) * 100.0 for r in chosen)
-        alloc_col = GREEN if alloc <= 100 else RED
-        _new = sum(1 for r in chosen if not r["held"])
+        # Two different scopes were being mixed here: the candidates in the table above,
+        # and everything already held in the book. Report them separately.
+        new_rows = [r for r in chosen if not r["held"]]
+        new_alloc = sum(r["size"] for r in new_rows)
+        new_risk = sum(r["size"] / 100.0 * (abs(r["px"] - r["stop"]) / r["px"]) * 100.0 for r in new_rows)
+        table_sectors = len({r["sec"] for r in chosen})
+        book_sectors = len({(UNIVERSE_SECTORS.get(tk) or info.get("sector") or "Other")
+                            for tk, info in open_book.items()})
+        alloc_col = GREEN if new_alloc <= 100 else RED
+
         st.markdown("<div class='ns-row' style='margin-top:10px;'>"
-                    + tile("New Ideas", str(_new), "%d already in the book" % (len(chosen) - _new),
-                           GREEN if _new else MUTED)
-                    + tile("Total Allocation", "{:.0f}%".format(alloc), "of the book if all were taken", alloc_col)
-                    + tile("Total Risk", "{:.1f}%".format(risk_total), "if every stop hit", AMBER)
-                    + tile("Sectors", str(len(per_sec)), "represented")
+                    + tile("New Ideas", str(len(new_rows)),
+                           "%d already in the book" % (len(chosen) - len(new_rows)),
+                           GREEN if new_rows else MUTED)
+                    + tile("If All Taken", "{:.0f}%".format(new_alloc),
+                           "added to the book, new ideas only", alloc_col)
+                    + tile("Added Risk", "{:.1f}%".format(new_risk),
+                           "if every new stop hit", AMBER)
+                    + tile("Already Open", str(len(open_book)),
+                           "positions across %d sector%s" % (book_sectors, "" if book_sectors == 1 else "s"))
+                    + tile("Sectors Here", str(table_sectors), "in the list above")
                     + "</div>", unsafe_allow_html=True)
 
         if dropped:
@@ -2268,7 +2292,9 @@ elif page_selection == "Swing Screener":
                     "sit under the swing low that produced the pullback; <strong>targets</strong> are prior pivot highs, "
                     "or fib extensions where price is in blue sky. A row marked <strong>IN BOOK</strong> is a position you "
                     "already hold: its entry and targets are recalculated from the latest close, so they will not "
-                    "match your fill. <strong>ATRs to T1</strong> is the distance to the first "
+                    "match your fill. <strong>Stop ATRs</strong> is how far the stop sits from entry in average daily ranges: "
+                    "under about 1.0 and ordinary noise takes it out, which also flatters the R:R. "
+                    "<strong>ATRs to T1</strong> is the distance to the first "
                     "target measured in average daily ranges, which is roughly the number of sessions it would take: "
                     "a $75 target on a volatile $400 stock can be nearer in practice than a $20 target on a quiet one. "
                     "<strong>Scale out</strong> is the share of the position taken at T1, T2 and T3. "
