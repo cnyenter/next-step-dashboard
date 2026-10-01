@@ -1958,7 +1958,7 @@ elif page_selection == "Swing Screener":
 
     # Defaults that the public view always uses
     direction, risk_pct, min_rr, max_ext, min_dv, req_rs = "Long", 1.5, 2.0, 6.0, 20.0, True
-    pos_cap, max_per_sector, max_atr, pullback_win = 15.0, 1, 15.0, 5
+    pos_cap, max_atr, pullback_win = 15.0, 15.0, 5
     min_stop_atr = 0.75
     scale_plan = "50 / 25 / 25"
 
@@ -1978,8 +1978,8 @@ elif page_selection == "Swing Screener":
             pos_cap = st.number_input("Max position size (% of book)", 5.0, 50.0, 15.0, 2.5,
                                       help="A tight stop can justify an enormous position on paper. It cannot protect against a gap.")
         with c5:
-            max_per_sector = st.number_input("Max candidates per sector", 1, 5, 1, 1,
-                                             help="At this position count, two names in a group is one oversized bet.")
+            st.caption("Sector concentration is flagged on each row rather than filtered, so nothing "
+                       "qualifying is hidden. The call is yours at the chart.")
         pullback_win = st.number_input("Setup must have fired within (sessions)", 3, 15, 5, 1,
                                        help="How recently price dipped through the 21MA. Widen it to keep setups "
                                             "on the list longer instead of ageing out after a week.")
@@ -1997,7 +1997,7 @@ elif page_selection == "Swing Screener":
                                        "A structurally valid target that sits 40 ATRs away is a position trade, not a swing.")
     else:
         st.caption("Candidates are generated from a fixed rule set: 21MA pullback in an established uptrend, "
-                   "structural stop, minimum 2:1 reward to the first target, a target reachable inside a swing timeframe, one name per sector.")
+                   "structural stop, minimum 2:1 reward to the first target, and a target reachable inside a swing timeframe.")
 
     @st.cache_data(ttl=3600, show_spinner="Scanning the universe...")
     def get_universe_ohlc(tickers, end_str):
@@ -2184,49 +2184,35 @@ elif page_selection == "Swing Screener":
     hits.sort(key=lambda r: (r["held"], -r["rr"]))
 
     # Concentration control: best R:R per sector first, then allocation budget
-    chosen, per_sec, alloc, dropped = [], {}, 0.0, []
-    # A name already in the book fills its sector slot: holding MPC means a second
-    # refiner is a bigger bet on the same thing, not a separate idea.
+    # Sector concentration is now shown rather than enforced. The screen's job is to
+    # surface every qualifying setup; whether a second name in a group is one idea or
+    # two is a judgement to make at the chart, not a rule that hides candidates.
+    book_sector_count = {}
     for _tk, _info in open_book.items():
         _s = UNIVERSE_SECTORS.get(_tk) or _info.get("sector") or "Other"
-        per_sec[_s] = per_sec.get(_s, 0) + 1
+        book_sector_count[_s] = book_sector_count.get(_s, 0) + 1
+
+    chosen, alloc = [], 0.0
     for r in hits:
-        if (not r["held"]) and per_sec.get(r["sec"], 0) >= max_per_sector:
-            dropped.append(r)
+        r["sector_held"] = book_sector_count.get(r["sec"], 0)
+        size = r["size"]
+        if alloc + size > 100.0:
+            size = max(0.0, 100.0 - alloc)
+        if size < 2.0 and not r["held"]:
             continue
-        if alloc + r["size"] > 100.0:
-            r = dict(r, size=max(0.0, 100.0 - alloc))
-            if r["size"] < 2.0:
-                break
-        if not r["held"]:
-            per_sec[r["sec"]] = per_sec.get(r["sec"], 0) + 1
-        alloc += r["size"]
+        r = dict(r, size=size)
+        alloc += size if not r["held"] else 0.0
         chosen.append(r)
 
     st.caption(("Data through the close of %s. " % asof.strftime("%a %b %d")) if asof else ""
                + ("The current session is excluded until it settles, so this list will not change during the day. "
                   if session_live else "")
-               + "Scanned %d names. %d passed the setup and R:R filters; %d shown after the sector limit."
-               % (len(data), len(hits), len(chosen)))
+               + "Scanned %d names. %d setup%s qualified."
+               % (len(data), len(hits), "" if len(hits) == 1 else "s"))
 
     if not chosen:
-        if dropped:
-            bysec = {}
-            for r in dropped:
-                bysec[r["sec"]] = bysec.get(r["sec"], 0) + 1
-            txt = ", ".join("%s (%d)" % (k, v) for k, v in sorted(bysec.items(), key=lambda kv: -kv[1]))
-            occupied = sorted({(UNIVERSE_SECTORS.get(tk) or info.get("sector") or "Other")
-                               for tk, info in open_book.items()})
-            st.warning("**%d setup%s qualified but every one was held back by the sector limit.** "
-                       "Blocked in: %s. Your open book already occupies %d sector%s (%s), and the limit is "
-                       "%d per sector, so candidates in those groups cannot appear. Raise the per-sector limit, "
-                       "or close something, to see them."
-                       % (len(dropped), "" if len(dropped) == 1 else "s", txt,
-                          len(occupied), "" if len(occupied) == 1 else "s", ", ".join(occupied),
-                          int(max_per_sector)))
-        else:
-            st.info("Nothing qualifies today. That is a valid result: with no clean pullbacks on offer, "
-                    "the honest answer is no trade rather than a lower bar.")
+        st.info("Nothing qualifies today. That is a valid result: with no clean pullbacks on offer, "
+                "the honest answer is no trade rather than a lower bar.")
     else:
         rows = ""
         for r in chosen:
@@ -2236,6 +2222,10 @@ elif page_selection == "Swing Screener":
                        "Thirds": (33, 33, 34), "50 / 50 at T2": (50, 50, 0)}[scale_plan]
             _plan = " / ".join(str(s) + "%" for s in _shares if s > 0)
             _mark = ""
+            if r.get("sector_held") and not r["held"]:
+                _mark += ("<span style='border:1px solid " + AMBER + "; color:" + AMBER + "; font-size:9.5px; "
+                          "font-weight:600; padding:1px 6px; border-radius:4px; margin-left:8px;'>"
+                          + ("HOLD %d IN SECTOR" % r["sector_held"]) + "</span>")
             if r["held"]:
                 _mark = ("<span style='border:1px solid " + AMBER + "; color:" + AMBER + "; font-size:9.5px; "
                          "font-weight:600; padding:1px 6px; border-radius:4px; margin-left:8px;'>IN BOOK @ "
@@ -2287,17 +2277,6 @@ elif page_selection == "Swing Screener":
                            "positions across %d sector%s" % (book_sectors, "" if book_sectors == 1 else "s"))
                     + tile("Sectors Here", str(table_sectors), "in the list above")
                     + "</div>", unsafe_allow_html=True)
-
-        if dropped:
-            bysec = {}
-            for r in dropped:
-                bysec[r["sec"]] = bysec.get(r["sec"], 0) + 1
-            txt = ", ".join("%d more in %s" % (v, k) for k, v in sorted(bysec.items(), key=lambda kv: -kv[1])[:4])
-            st.markdown("<div class='ns-panel' style='margin-top:8px;border-left:3px solid " + MUTED + ";'>"
-                        "<span style='font-size:13px;color:#cdd8e4;'>" + str(len(dropped))
-                        + " qualifying name" + ("" if len(dropped) == 1 else "s")
-                        + " held back by the sector limit (" + txt + "). Names in the same group move together, "
-                          "so taking all of them is one position, not several.</span></div>", unsafe_allow_html=True)
 
         st.markdown("<div class='ns-panel' style='margin-top:8px;border-left:3px solid " + BLUE + ";'>"
                     "<span style='font-size:13.5px;color:#cdd8e4;'><strong>Size</strong> is the position as a percentage "
