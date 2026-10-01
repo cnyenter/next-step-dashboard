@@ -2210,8 +2210,23 @@ elif page_selection == "Swing Screener":
                % (len(data), len(hits), len(chosen)))
 
     if not chosen:
-        st.info("Nothing qualifies today. That is a valid result: with no clean pullbacks on offer, "
-                "the honest answer is no trade rather than a lower bar.")
+        if dropped:
+            bysec = {}
+            for r in dropped:
+                bysec[r["sec"]] = bysec.get(r["sec"], 0) + 1
+            txt = ", ".join("%s (%d)" % (k, v) for k, v in sorted(bysec.items(), key=lambda kv: -kv[1]))
+            occupied = sorted({(UNIVERSE_SECTORS.get(tk) or info.get("sector") or "Other")
+                               for tk, info in open_book.items()})
+            st.warning("**%d setup%s qualified but every one was held back by the sector limit.** "
+                       "Blocked in: %s. Your open book already occupies %d sector%s (%s), and the limit is "
+                       "%d per sector, so candidates in those groups cannot appear. Raise the per-sector limit, "
+                       "or close something, to see them."
+                       % (len(dropped), "" if len(dropped) == 1 else "s", txt,
+                          len(occupied), "" if len(occupied) == 1 else "s", ", ".join(occupied),
+                          int(max_per_sector)))
+        else:
+            st.info("Nothing qualifies today. That is a valid result: with no clean pullbacks on offer, "
+                    "the honest answer is no trade rather than a lower bar.")
     else:
         rows = ""
         for r in chosen:
