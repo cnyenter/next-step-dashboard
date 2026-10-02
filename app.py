@@ -2260,7 +2260,7 @@ elif page_selection == "Swing Screener":
         new_rows = [r for r in chosen if not r["held"]]
         new_alloc = sum(r["size"] for r in new_rows)
         new_risk = sum(r["size"] / 100.0 * (abs(r["px"] - r["stop"]) / r["px"]) * 100.0 for r in new_rows)
-        table_sectors = len({r["sec"] for r in chosen})
+        new_sectors = len({r["sec"] for r in new_rows})
         book_sectors = len({(UNIVERSE_SECTORS.get(tk) or info.get("sector") or "Other")
                             for tk, info in open_book.items()})
         alloc_col = GREEN if new_alloc <= 100 else RED
@@ -2275,7 +2275,8 @@ elif page_selection == "Swing Screener":
                            "if every new stop hit", AMBER)
                     + tile("Already Open", str(len(open_book)),
                            "positions across %d sector%s" % (book_sectors, "" if book_sectors == 1 else "s"))
-                    + tile("Sectors Here", str(table_sectors), "in the list above")
+                    + tile("New Idea Sectors", str(new_sectors),
+                           "groups the new ideas sit in")
                     + "</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='ns-panel' style='margin-top:8px;border-left:3px solid " + BLUE + ";'>"
