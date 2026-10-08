@@ -1959,6 +1959,7 @@ elif page_selection == "Swing Screener":
     # Defaults that the public view always uses
     direction, risk_pct, min_rr, max_ext, min_dv, req_rs = "Long", 1.5, 2.0, 6.0, 20.0, True
     pos_cap, max_atr, pullback_win = 15.0, 15.0, 5
+    lookback_sessions = 5
     min_stop_atr = 0.75
     scale_plan = "50 / 25 / 25"
 
@@ -1992,6 +1993,10 @@ elif page_selection == "Swing Screener":
                                            "the setup is right, and it inflates R:R. Setups whose swing low sits "
                                            "nearer than this are rejected rather than widened, because a widened stop "
                                            "is no longer the structural level.")
+        lookback_sessions = st.number_input("Also show setups from the last N sessions", 1, 10, 5, 1,
+                                           help="Re-runs the same rules against earlier closes, so a setup that "
+                                                "fired while you were away still shows up with the numbers it had "
+                                                "on the day. 1 means today only.")
         max_atr = st.number_input("Max average daily ranges to T1", 4.0, 60.0, 15.0, 1.0,
                                   help="One ATR is roughly one session of movement, so 15 is about three weeks. "
                                        "A structurally valid target that sits 40 ATRs away is a position trade, not a swing.")
@@ -2167,6 +2172,63 @@ elif page_selection == "Swing Screener":
                     ext=ext, rs=rs, atr=atr, atr_t1=atr_t1, stop_atr=risk / atr, raw=raw_size,
                     size=min(raw_size, pos_cap), capped=raw_size > pos_cap)
 
+    def drop_reason(t, df, want_long):
+        """First condition today's bar fails, plus whether the trend itself still holds.
+
+        A setup that merely aged out of the pullback window is a different thing from
+        one whose trend has broken: the first is still a live idea, the second is not.
+        """
+        c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
+        px = float(c.iloc[-1])
+        e21 = c.ewm(span=21, adjust=False).mean()
+        s50 = c.rolling(50).mean()
+        if pd.isna(s50.iloc[-1]):
+            return "No history", False
+        m21, m50 = float(e21.iloc[-1]), float(s50.iloc[-1])
+        trend_ok = (px > m21 > m50 and px > m50) if want_long else (px < m21 < m50 and px < m50)
+
+        pc = c.shift(1)
+        tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+        atr = float(tr.tail(14).mean())
+        if not atr or pd.isna(atr) or atr <= 0:
+            return "No range data", trend_ok
+        if float((c * v).tail(20).mean()) / 1e6 < min_dv:
+            return "Volume thinned", trend_ok
+        if not trend_ok:
+            return "Trend broke", False
+
+        ext = (px / m21 - 1.0) * 100.0
+        if (ext > max_ext) if want_long else (abs(ext) > max_ext):
+            return "Ran too far from the 21MA", trend_ok
+
+        w = int(pullback_win)
+        fired = bool((df["Low"].iloc[-w:] < e21.iloc[-w:]).any()) if want_long \
+            else bool((df["High"].iloc[-w:] > e21.iloc[-w:]).any())
+        if not fired:
+            return "Aged out of the window", trend_ok
+
+        rs = (px / float(c.iloc[-64]) - 1.0) * 100.0 if len(c) > 64 else None
+        if req_rs and (rs is None or spx_3m is None or
+                       (rs <= spx_3m if want_long else rs >= spx_3m)):
+            return "Lost relative strength", trend_ok
+
+        stop = (float(l.tail(10).min()) * 0.995) if want_long else (float(h.tail(10).max()) * 1.005)
+        risk = (px - stop) if want_long else (stop - px)
+        if risk <= 0:
+            return "Stop on the wrong side", trend_ok
+        if risk < atr * min_stop_atr:
+            return "Stop too tight now", trend_ok
+
+        tg = sorted([float(x) for x in pivots(h.tail(160), 5, True).values if x > px * 1.005]) if want_long \
+            else sorted([float(x) for x in pivots(l.tail(160), 5, False).values if x < px * 0.995], reverse=True)
+        if tg:
+            rr = ((tg[0] - px) / risk) if want_long else ((px - tg[0]) / risk)
+            if rr < min_rr:
+                return "R:R fell below the minimum", trend_ok
+            if abs(tg[0] - px) / atr > max_atr:
+                return "Target too far now", trend_ok
+        return "No longer qualifies", trend_ok
+
     want_long = (direction == "Long")
     hits = []
     for t, df in data.items():
@@ -2295,6 +2357,77 @@ elif page_selection == "Swing Screener":
                     "<strong>Scale out</strong> is the share of the position taken at T1, T2 and T3. "
                     "The stop moves to breakeven as soon as T1 fills, which matters more to the result than the "
                     "ratio does.</span></div>", unsafe_allow_html=True)
+
+    # ---- What fired earlier in the week ----
+    # Nothing is stored: the same rules are simply re-run against each earlier close,
+    # so a setup that appeared while you were away is reproduced with that day's numbers.
+    if int(lookback_sessions) > 1:
+        prior = {}
+        for k in range(1, int(lookback_sessions)):
+            day_label = None
+            for t, df in data.items():
+                if len(df) <= 130 + k:
+                    continue
+                sub = df.iloc[:-k]
+                if day_label is None:
+                    day_label = sub.index[-1].date()
+                try:
+                    r = scan(t, sub, want_long)
+                except Exception:
+                    continue
+                if r and t not in prior:
+                    r["fired"] = sub.index[-1].date()
+                    prior[t] = r
+        today_set = {r["t"] for r in chosen}
+        missed = []
+        for t, r in prior.items():
+            if t in today_set:
+                continue
+            try:
+                r["why"], r["trend_ok"] = drop_reason(t, data[t], want_long)
+            except Exception:
+                r["why"], r["trend_ok"] = "No longer qualifies", False
+            missed.append(r)
+        missed.sort(key=lambda r: (not r.get("trend_ok", False), -r["fired"].toordinal(), -r["rr"]))
+
+        st.markdown("<div class='ns-section' style='margin-top:22px;'>🗓️ Fired Earlier, Gone Today</div>",
+                    unsafe_allow_html=True)
+        st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                    "Setups that qualified on one of the last " + str(int(lookback_sessions) - 1)
+                    + " sessions but no longer do, shown with the numbers they had that day. "
+                      "Useful after a few days away, but treat them as history: the entry is that session's close, "
+                      "not a live price. <strong>Trend intact</strong> means the name still sits the right side of "
+                      "its 21MA and 50MA and is worth a chart; <strong>Invalidated</strong> means the structure "
+                      "that justified the setup has gone.</p>", unsafe_allow_html=True)
+
+        if not missed:
+            st.info("Nothing fired earlier in the window that is not still on the list above.")
+        else:
+            rows2 = ""
+            for r in missed[:12]:
+                t1 = r["tg"][0]
+                held_chip = ""
+                if r["t"] in open_book:
+                    held_chip = ("<span style='border:1px solid " + AMBER + "; color:" + AMBER + "; font-size:9.5px; "
+                                 "font-weight:600; padding:1px 6px; border-radius:4px; margin-left:8px;'>IN BOOK</span>")
+                rows2 += ("<tr><td style='font-weight:700;'>" + r["t"] + held_chip + "</td>"
+                          "<td style='color:" + MUTED + ";'>" + r["sec"] + "</td>"
+                          "<td style='color:" + MUTED + ";'>" + r["fired"].strftime("%a %b %d") + "</td>"
+                          "<td style='text-align:right;'>" + "{:,.2f}".format(r["px"]) + "</td>"
+                          "<td style='text-align:right;color:" + RED + ";'>" + "{:,.2f}".format(r["stop"]) + "</td>"
+                          "<td style='text-align:right;color:" + GREEN + ";'>" + "{:,.2f}".format(t1) + "</td>"
+                          "<td style='text-align:right;font-weight:700;color:" + AMBER + ";'>" + "{:.1f}".format(r["rr"]) + "</td>"
+                          "<td style='text-align:right;color:" + MUTED + ";'>" + "{:.2f}".format(r["stop_atr"]) + "</td>"
+                          "<td style='color:" + (GREEN if r["trend_ok"] else RED) + ";font-weight:600;'>"
+                          + ("Trend intact" if r["trend_ok"] else "Invalidated") + "</td>"
+                          "<td style='color:" + MUTED + ";'>" + r["why"] + "</td></tr>")
+            st.markdown("<table class='ns-tbl'><tr>"
+                        "<th style='text-align:left;'>Ticker</th><th style='text-align:left;'>Sector</th>"
+                        "<th style='text-align:left;'>Fired</th><th style='text-align:right;'>Entry that day</th>"
+                        "<th style='text-align:right;'>Stop</th><th style='text-align:right;'>T1</th>"
+                        "<th style='text-align:right;'>R:R</th><th style='text-align:right;'>Stop ATRs</th>"
+                        "<th style='text-align:left;'>Status</th><th style='text-align:left;'>Why it dropped</th>"
+                        "</tr>" + rows2 + "</table>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
                 "A screen is a starting point, not a trade list. Check earnings dates before entering anything. "
