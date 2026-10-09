@@ -986,19 +986,55 @@ elif page_selection == "Swing Book":
     st.divider()
     st.markdown("<div class='ns-section'>📈 Performance vs SPX</div>", unsafe_allow_html=True)
 
-    if closed_df.empty or closed_df["Date_Closed_dt"].notna().sum() == 0:
+    # Every exit is booked in the month it actually happened, so a trade scaled out over two
+    # months contributes to both. Only realised exits count: the unsold part of an open
+    # position stays out until it is sold.
+    def book_leg_contributions(df, default_w):
+        """({month: % of book}, number of partial exits that had no usable date)."""
+        contribs, undated = {}, 0
+        for _, row in df.iterrows():
+            status = str(row.get("Status", "")).strip().upper()
+            if status not in ("OPEN", "CLOSED"):
+                continue
+            entry = _num(row.get("Entry"))
+            if not entry:
+                continue
+            side = row.get("Side", "Long")
+            w = _num(row.get("Weight_Pct")) or default_w
+            closed_dt = row.get("Date_Closed_dt") if status == "CLOSED" else None
+
+            legs = []                                    # (date, % of position sold, price)
+            for i in (1, 2):
+                px, pc = _num(row.get("Exit%d_Price" % i)), _num(row.get("Exit%d_Pct" % i))
+                if px and pc and pc > 0:
+                    d = row.get("Exit%d_Date_dt" % i)
+                    if d is None or pd.isna(d):
+                        d = closed_dt                    # undated partial on a closed trade: use the close
+                    legs.append((d, pc, px))
+            taken = sum(pc for _, pc, _ in legs)
+            final_px = _num(row.get("Exit_Price"))
+            if status == "CLOSED" and final_px:
+                legs.append((closed_dt, max(0.0, 100.0 - taken), final_px))
+
+            for d, pc, px in legs:
+                if d is None or pd.isna(d):
+                    undated += 1
+                    continue
+                m = pd.Timestamp(d).to_period("M")
+                contribs[m] = contribs.get(m, 0.0) + leg_return(entry, px, side) * (pc / 100.0) * (w / 100.0)
+        return contribs, undated
+
+    default_w = 100.0 / float(MAX_OPEN_POSITIONS)
+    for _c in ("Exit1_Date", "Exit2_Date"):
+        if _c in book.columns:
+            book[_c + "_dt"] = parse_date_col(book[_c])
+    leg_contribs, undated_legs = book_leg_contributions(book, default_w)
+    book_monthly = pd.Series(leg_contribs, dtype=float).sort_index()
+
+    if not leg_contribs:
         st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13.5px;'>"
-                    "Monthly performance against SPX appears here once the first trades close.</div>", unsafe_allow_html=True)
+                    "Monthly performance against SPX appears here once the first exits are booked.</div>", unsafe_allow_html=True)
     else:
-        default_w = 100.0 / float(MAX_OPEN_POSITIONS)
-        cd = closed_df.dropna(subset=["Date_Closed_dt"]).copy()
-        cd["Month"] = cd["Date_Closed_dt"].dt.to_period("M")
-        if "Weight_Pct" in cd.columns:
-            w = pd.to_numeric(cd["Weight_Pct"], errors="coerce").fillna(default_w)
-        else:
-            w = pd.Series(default_w, index=cd.index)
-        cd["Contribution"] = cd["Result %"] * (w / 100.0)
-        book_monthly = cd.groupby("Month")["Contribution"].sum()
 
         idx_monthly = pd.Series(dtype=float)
         if bench_hist is not None and not bench_hist.empty:
@@ -1064,13 +1100,20 @@ elif page_selection == "Swing Book":
                         "</tr>" + rows_html + "</table>", unsafe_allow_html=True)
 
             n_months = len([m for m in months if m in book_monthly.index])
-            method = ("Each closed trade is weighted at {:.1f}% of the book (an equal slice of {} maximum positions), "
-                      "so a trade's contribution is its return times that weight — not the raw trade percentage. "
+            method = ("Each exit is booked in the month it happened and weighted at {:.1f}% of the book (an equal slice of {} "
+                      "maximum positions), so a trade scaled out over two months contributes to both. A leg's contribution is "
+                      "its return, times the share of the position sold, times that weight, not the raw trade percentage. "
+                      "Only realised exits count: the unsold part of an open position is left out until it is sold. "
                       "Uninvested cash earns nothing. SPX is the price index over the same months."
                       ).format(default_w, MAX_OPEN_POSITIONS)
             if n_months < 3:
-                method += " With only {} month{} of closed trades, treat these figures as a starting point rather than a track record.".format(
+                method += " With only {} month{} of exits, treat these figures as a starting point rather than a track record.".format(
                     n_months, "" if n_months == 1 else "s")
+            if undated_legs:
+                method += (" {} partial exit{} on open trades had no Exit date and {} left out of the chart; "
+                           "fill in Exit1_Date or Exit2_Date to include {}.").format(
+                    undated_legs, "" if undated_legs == 1 else "s", "was" if undated_legs == 1 else "were",
+                    "it" if undated_legs == 1 else "them")
             st.markdown("<div class='ns-panel' style='margin-top:10px; border-left:3px solid " + BLUE + ";'>"
                         "<span style='font-size:13px; color:#cdd8e4;'><strong>How this is calculated.</strong> " + method
                         + "</span></div>", unsafe_allow_html=True)
