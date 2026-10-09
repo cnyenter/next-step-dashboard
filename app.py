@@ -217,6 +217,30 @@ def clean_str(v):
         pass
     return str(v).strip()
 
+def find_reclaim(day_bars, edge, is_support):
+    """First 15-minute close back through `edge` after price had traded beyond it.
+
+    A look below and fail only becomes tradable once price comes back. The entry is the close of the
+    first bar that finishes back above a support (or back below a resistance) after the sweep, never
+    the extreme of the sweep itself, which nobody is filled at. Returns {price, ts} or None.
+    """
+    if day_bars is None or len(day_bars) == 0:
+        return None
+    swept = False
+    for ts, b in day_bars.iterrows():
+        lo, hi, cl = float(b["Low"]), float(b["High"]), float(b["Close"])
+        if is_support:
+            if not swept and lo < edge:
+                swept = True
+            if swept and cl >= edge:
+                return dict(price=cl, ts=ts)
+        else:
+            if not swept and hi > edge:
+                swept = True
+            if swept and cl <= edge:
+                return dict(price=cl, ts=ts)
+    return None
+
 def level_name(is_sup, bottom, top, label=""):
     txt = ("S " if is_sup else "R ")
     txt += "{:,.0f}".format(bottom) if abs(top - bottom) < 0.5 else "{:,.0f} – {:,.0f}".format(bottom, top)
@@ -1590,10 +1614,15 @@ elif page_selection == "Weekly Recap":
                     # This is the look-below-and-fail / look-above-and-fail setup.
                     d_low, d_high, d_close = float(d["Low"]), float(d["High"]), float(d["Close"])
                     extreme = d_low if eff_sup else d_high
-                    recovered = (d_close - d_low) if eff_sup else (d_high - d_close)
-                    setups.append(dict(day=d.name, zone=(zb, zt), sup=eff_sup, lbl=lbl,
-                                       extreme=extreme, close=d_close, pts=recovered,
-                                       flipped=flipped))
+                    # Entry is the reclaim, not the sweep extreme. For a zone, the near edge: the bottom of a
+                    # support zone, the top of a resistance zone.
+                    day_bars = bars[bars.index.date == d.name.date()]
+                    rc = find_reclaim(day_bars, zb if eff_sup else zt, eff_sup)
+                    pts = None
+                    if rc is not None:
+                        pts = (d_close - rc["price"]) if eff_sup else (rc["price"] - d_close)
+                    setups.append(dict(day=d.name, zone=(zb, zt), sup=eff_sup, lbl=lbl, extreme=extreme,
+                                       reclaim=rc, close=d_close, pts=pts, flipped=flipped))
                 if g != "none":
                     any_test = True
                     tested += 1
@@ -1680,7 +1709,7 @@ elif page_selection == "Weekly Recap":
                     unsafe_allow_html=True)
         st.markdown("<div class='ns-panel'>" + card_html + "</div>", unsafe_allow_html=True)
         if setups:
-            setups.sort(key=lambda s: -s["pts"])
+            setups.sort(key=lambda s: (s["pts"] is None, -(s["pts"] or 0.0)))
             rows_html = ""
             for s in setups:
                 kind = "Look below and fail" if s["sup"] else "Look above and fail"
@@ -1688,33 +1717,50 @@ elif page_selection == "Weekly Recap":
                 zone_txt = "{:,.0f}".format(zb) if abs(zt - zb) < 0.5 else "{:,.0f} – {:,.0f}".format(zb, zt)
                 if s["lbl"]:
                     zone_txt += " (" + s["lbl"] + ")"
+                if s["reclaim"] is not None:
+                    rc_txt = ("{:,.0f}".format(s["reclaim"]["price"]) + " <span style='color:" + MUTED + ";font-size:11.5px;'>"
+                              + s["reclaim"]["ts"].strftime("%H:%M") + "</span>")
+                else:
+                    rc_txt = "&mdash;"
                 rows_html += ("<tr><td style='color:" + MUTED + ";'>" + s["day"].strftime("%a") + "</td>"
                               "<td style='font-weight:600;color:" + (GREEN if s["sup"] else RED) + ";'>" + kind + "</td>"
                               "<td>" + zone_txt + ("*" if s["flipped"] else "") + "</td>"
-                              "<td style='text-align:right;'>" + "{:,.0f}".format(s["extreme"]) + "</td>"
+                              "<td style='text-align:right;color:" + MUTED + ";'>" + "{:,.0f}".format(s["extreme"]) + "</td>"
+                              "<td style='text-align:right;'>" + rc_txt + "</td>"
                               "<td style='text-align:right;'>" + "{:,.0f}".format(s["close"]) + "</td>"
-                              "<td style='text-align:right;font-weight:700;color:" + AMBER + ";'>"
-                              + "{:+,.0f}".format(s["pts"]) + "</td></tr>")
+                              "<td style='text-align:right;font-weight:700;color:"
+                              + ((GREEN if s["pts"] >= 0 else RED) if s["pts"] is not None else MUTED) + ";'>"
+                              + ("{:+,.0f}".format(s["pts"]) if s["pts"] is not None else "&mdash;") + "</td></tr>")
             best = setups[0]
+            measured = [s for s in setups if s["pts"] is not None]
+            total_pts = sum(s["pts"] for s in measured)
             st.markdown("<div class='ns-section' style='margin-top:18px;'>🎯 Setups That Fired</div>",
                         unsafe_allow_html=True)
             st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                        "Every look-below-and-fail and look-above-and-fail at a published level this week, "
-                        "with the points from the sweep back to the close.</p>", unsafe_allow_html=True)
+                        "Every look-below-and-fail and look-above-and-fail at a published level this week. "
+                        "<strong>Reclaimed</strong> is the close of the first 15-minute bar back through the level's near edge "
+                        "after the sweep (the bottom of a support zone, the top of a resistance zone), which is where an entry "
+                        "is realistic. <strong>Points</strong> run from that reclaim to the day's close. The sweep extreme is "
+                        "shown only for depth: nobody is filled there.</p>", unsafe_allow_html=True)
             st.markdown("<table class='ns-tbl'><tr>"
                         "<th style='text-align:left;'>Day</th><th style='text-align:left;'>Setup</th>"
                         "<th style='text-align:left;'>Level</th><th style='text-align:right;'>Swept to</th>"
+                        "<th style='text-align:right;'>Reclaimed</th>"
                         "<th style='text-align:right;'>Close</th><th style='text-align:right;'>Points</th>"
                         "</tr>" + rows_html + "</table>", unsafe_allow_html=True)
+            _best_txt = ""
+            if best["pts"] is not None:
+                _best_txt = (" The best was the " + ("look below and fail at " if best["sup"] else "look above and fail at ")
+                             + ("{:,.0f}".format(best["zone"][0]) if abs(best["zone"][1] - best["zone"][0]) < 0.5
+                                else "{:,.0f} – {:,.0f}".format(best["zone"][0], best["zone"][1]))
+                             + " on " + best["day"].strftime("%A") + ", worth " + "{:+,.0f}".format(best["pts"]) + " points.")
             st.markdown("<div class='ns-panel' style='margin-top:8px; border-left:3px solid " + AMBER + ";'>"
                         "<span style='font-size:13.5px; color:#cdd8e4;'><strong>"
                         + str(len(setups)) + " setup" + ("" if len(setups) == 1 else "s")
-                        + " fired at published levels this week.</strong> The best was "
-                        + ("the look below and fail at " if best["sup"] else "the look above and fail at ")
-                        + ("{:,.0f}".format(best["zone"][0]) if abs(best["zone"][1] - best["zone"][0]) < 0.5
-                           else "{:,.0f} – {:,.0f}".format(best["zone"][0], best["zone"][1]))
-                        + " on " + best["day"].strftime("%A") + ", worth " + "{:,.0f}".format(best["pts"])
-                        + " points from the sweep to the close.</span></div>", unsafe_allow_html=True)
+                        + " fired at published levels this week.</strong> Entering on the reclaim and holding to the close, "
+                        + (("they were worth " + "{:+,.0f}".format(total_pts) + " points in total.") if measured
+                           else "none had a clean 15-minute reclaim to measure from.")
+                        + _best_txt + "</span></div>", unsafe_allow_html=True)
 
         if flips:
             st.markdown("<div class='ns-panel' style='margin-top:8px; border-left:3px solid " + AMBER + ";'>"
@@ -1724,14 +1770,6 @@ elif page_selection == "Weekly Recap":
                         "resistance (or the reverse) before the bell. Those are marked with an asterisk, and they "
                         "still count: the price mattered, just from the other direction.</span></div>",
                         unsafe_allow_html=True)
-        if ma_tested and st_tested:
-            st.markdown("<div class='ns-panel' style='margin-top:8px; border-left:3px solid " + BLUE + ";'>"
-                        "<span style='font-size:13.5px; color:#cdd8e4;'><strong>Moving-average levels held "
-                        + "{:.0f}%".format(ma_held / ma_tested * 100) + "</strong> of the time they were tested ("
-                        + str(ma_held) + " of " + str(ma_tested) + "), versus <strong>"
-                        + "{:.0f}%".format(st_held / st_tested * 100) + "</strong> for structural levels ("
-                        + str(st_held) + " of " + str(st_tested) + ").</span></div>", unsafe_allow_html=True)
-
     # ---------- 2. Where the week was fought (time at price) ----------
     st.markdown("<div class='ns-section'>📊 Where The Week Was Fought</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
@@ -2479,10 +2517,21 @@ elif page_selection == "Swing Screener":
         atr_t1 = abs(tg[0] - px) / atr
         if atr_t1 > max_atr:
             return None
+        # Entries here are the last close, but the order goes in at the next open. This is the range of
+        # opens at which the setup still clears the two rules that depend on the entry price, with the
+        # stop and T1 left where they are: reward at least min_rr times the risk, and a stop at least
+        # min_stop_atr ATRs away. Outside it the trade is no longer the one that was screened.
+        if want_long:
+            open_hi = (tg[0] + min_rr * stop) / (1.0 + min_rr)
+            open_lo = stop + atr * min_stop_atr
+        else:
+            open_lo = (min_rr * stop + tg[0]) / (1.0 + min_rr)
+            open_hi = stop - atr * min_stop_atr
         # Flat sizing: every candidate gets the same share of the book, so the risk on each
         # trade is whatever its stop distance makes it. The Risk column shows that figure.
         return dict(t=t, sec=UNIVERSE_SECTORS.get(t, "Other"), px=px, stop=stop, tg=tg, rr=rr,
                     ext=ext, rs=rs, atr=atr, atr_t1=atr_t1, stop_atr=risk / atr,
+                    open_lo=open_lo, open_hi=open_hi,
                     raw=float(pos_cap), size=float(pos_cap), capped=False)
 
     def drop_reason(t, df, want_long):
@@ -2597,6 +2646,7 @@ elif page_selection == "Swing Screener":
             _shares = {"50 / 25 / 25": (50, 25, 25), "All out at T1": (100, 0, 0),
                        "Thirds": (33, 33, 34), "50 / 50 at T2": (50, 50, 0)}[scale_plan]
             _plan = " / ".join(str(s) + "%" for s in _shares if s > 0)
+            _vo = ("&mdash;" if r["held"] else "{:,.2f} to {:,.2f}".format(r["open_lo"], r["open_hi"]))
             _mark = ""
             if r.get("sector_held") and not r["held"]:
                 _mark += ("<span style='border:1px solid " + AMBER + "; color:" + AMBER + "; font-size:9.5px; "
@@ -2609,6 +2659,7 @@ elif page_selection == "Swing Screener":
             rows += ("<tr><td style='font-weight:700;'>" + r["t"] + _mark + "</td>"
                      "<td style='color:" + MUTED + ";'>" + r["sec"] + "</td>"
                      "<td style='text-align:right;'>" + "{:,.2f}".format(r["px"]) + "</td>"
+                     "<td style='text-align:right;color:" + MUTED + ";white-space:nowrap;'>" + _vo + "</td>"
                      "<td style='text-align:right;color:" + RED + ";'>" + "{:,.2f}".format(r["stop"]) + "</td>"
                      "<td style='text-align:right;color:" + GREEN + ";'>" + "{:,.2f}".format(t1) + "</td>"
                      "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:,.2f}".format(t2) if t2 else "—") + "</td>"
@@ -2624,7 +2675,8 @@ elif page_selection == "Swing Screener":
                      "<td style='text-align:right;color:" + MUTED + ";'>" + _plan + "</td></tr>")
         st.markdown("<table class='ns-tbl'><tr>"
                     "<th style='text-align:left;'>Ticker</th><th style='text-align:left;'>Sector</th>"
-                    "<th style='text-align:right;'>Entry</th><th style='text-align:right;'>Stop</th>"
+                    "<th style='text-align:right;'>Entry</th><th style='text-align:right;'>Valid open</th>"
+                    "<th style='text-align:right;'>Stop</th>"
                     "<th style='text-align:right;'>T1</th><th style='text-align:right;'>T2</th>"
                     "<th style='text-align:right;'>T3</th><th style='text-align:right;'>R:R</th>"
                     "<th style='text-align:right;'>Size</th><th style='text-align:right;'>Risk</th>"
@@ -2664,7 +2716,8 @@ elif page_selection == "Swing Screener":
                     "sit under the swing low that produced the pullback; <strong>targets</strong> are prior pivot highs, "
                     "or fib extensions where price is in blue sky. A row marked <strong>IN BOOK</strong> is a position you "
                     "already hold: its entry and targets are recalculated from the latest close, so they will not "
-                    "match your fill. <strong>Stop ATRs</strong> is how far the stop sits from entry in average daily ranges: "
+                    "match your fill. <strong>Valid open</strong> is the range of opening prices at which a new candidate still "
+                    "clears the minimum R:R and the minimum stop distance with its stop and T1 left where they are; outside it, the setup is no longer the one screened. <strong>Stop ATRs</strong> is how far the stop sits from entry in average daily ranges: "
                     "under about 1.0 and ordinary noise takes it out, which also flatters the R:R. "
                     "<strong>ATRs to T1</strong> is the distance to the first "
                     "target measured in average daily ranges, which is roughly the number of sessions it would take: "
