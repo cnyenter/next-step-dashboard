@@ -117,6 +117,38 @@ def fetch_many_closes(tickers, start_str, end_str):
         return None
     return pd.DataFrame(cols)
 
+def fetch_many_ohlc(tickers, start_str):
+    """{ticker: DataFrame[Open, High, Low, Close]} of daily bars up to today, in ONE request.
+
+    Raw (unadjusted) prices, because stops and targets are set against the prices that
+    actually traded, not prices restated for later dividends.
+    """
+    if not tickers:
+        return {}
+    try:
+        data = _fetch_with_retry(lambda: yf.download(
+            tickers=" ".join(tickers), start=start_str, interval="1d",
+            group_by="ticker", auto_adjust=False, progress=False, threads=False))
+    except Exception:
+        return {}
+    if data is None or len(data) == 0:
+        return {}
+    out = {}
+    for t in tickers:
+        try:
+            if isinstance(data.columns, pd.MultiIndex):
+                if t not in data.columns.get_level_values(0):
+                    continue
+                df = data[t]
+            else:
+                df = data
+            df = df[["Open", "High", "Low", "Close"]].dropna()
+            if len(df):
+                out[t] = df
+        except Exception:
+            continue
+    return out
+
 def fetch_many_last(tickers):
     """Latest close for many tickers in ONE request."""
     if not tickers:
@@ -923,6 +955,192 @@ elif page_selection == "Swing Book":
                     + ladder_html + "</div>")
             st.markdown(card, unsafe_allow_html=True)
 
+    # ---- Rules check (operator only) ----
+    # Replays every open position against daily bars using the stop and targets in the sheet, so a
+    # stop or target hit while you were away shows up as a lookup instead of being found weeks later.
+    try:
+        _code = st.secrets.get("SCREENER_PASSCODE", None)
+    except Exception:
+        _code = None
+    operator = False
+    if _code:
+        operator = (st.sidebar.text_input("Operator passcode", type="password", key="scr_pass") == _code)
+
+    SCALE_PLAN = (50, 25, 25)     # share sold at T1, T2, T3; used for the "enter this in the sheet" lines
+
+    def rules_check(row, bars):
+        """Walk a position forward from the session after it was opened, using its own stop and targets.
+
+        Daily bars hide the order of events inside a day, so a bar that touches both the stop and a
+        target counts as a stop, and a level that price gapped through fills at the open rather than at
+        its own price. After T1 the stop moves to breakeven, matching the scale-out rule.
+        """
+        is_long = str(row.get("Side", "Long")) == "Long"
+        entry, stop = _num(row.get("Entry")), _num(row.get("Stop"))
+        tg = [x for x in (_num(row.get("T1")), _num(row.get("T2")), _num(row.get("T3"))) if x]
+        opened = row.get("Date_Opened_dt")
+        out = dict(events=[], stopped=None, hits=0, n_targets=len(tg), last=None, asof=None,
+                   no_data=False, no_date=False)
+        if opened is None or pd.isna(opened):
+            out["no_date"] = True
+            return out
+        if bars is None or len(bars) == 0 or not entry or not stop:
+            out["no_data"] = True
+            return out
+        out["last"], out["asof"] = float(bars["Close"].iloc[-1]), bars.index[-1].date()
+        stop_now = stop
+        for d, bar in bars.iterrows():
+            if d.date() <= opened.date():
+                continue                      # the entry day cannot be told apart from the fill itself
+            o, hi, lo = float(bar["Open"]), float(bar["High"]), float(bar["Low"])
+            if (lo <= stop_now) if is_long else (hi >= stop_now):
+                gapped = (o < stop_now) if is_long else (o > stop_now)
+                out["stopped"] = dict(date=d.date(), fill=(o if gapped else stop_now), gapped=gapped,
+                                      breakeven=out["hits"] >= 1, level=stop_now)
+                return out
+            while out["hits"] < len(tg) and ((hi >= tg[out["hits"]]) if is_long else (lo <= tg[out["hits"]])):
+                lvl = tg[out["hits"]]
+                gapped = (o > lvl) if is_long else (o < lvl)
+                out["hits"] += 1
+                out["events"].append(dict(label="T%d" % out["hits"], date=d.date(), level=lvl,
+                                          fill=(o if gapped else lvl), gapped=gapped))
+                if out["hits"] == 1:
+                    stop_now = entry
+        return out
+
+    def needs_action(res, row):
+        """Set what the rules say against what the sheet says. Returns severity, lines to enter, result."""
+        rec = partial_legs(row)
+        n_rec = len(rec)
+        lines, final = [], None
+        for k, ev in enumerate(res["events"]):
+            if k >= n_rec and k < 2:
+                lines.append("Exit%d_Date %s, Exit%d_Price %.2f, Exit%d_Pct %d"
+                             % (k + 1, ev["date"].isoformat(), k + 1, ev["fill"], k + 1, SCALE_PLAN[k]))
+            if k == 2:
+                final = ev
+        if res["stopped"]:
+            s = res["stopped"]
+            lines.append("Status CLOSED, Date_Closed %s, Exit_Price %.2f" % (s["date"].isoformat(), s["fill"]))
+            final = dict(date=s["date"], fill=s["fill"])
+        elif res["n_targets"] and res["hits"] == res["n_targets"]:
+            ev = res["events"][-1]
+            lines.append("Status CLOSED, Date_Closed %s, Exit_Price %.2f" % (ev["date"].isoformat(), ev["fill"]))
+            final = ev
+
+        result = None
+        if lines:
+            r2 = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+            for k, ev in enumerate(res["events"][:2]):
+                if k >= n_rec:
+                    r2["Exit%d_Price" % (k + 1)], r2["Exit%d_Pct" % (k + 1)] = ev["fill"], SCALE_PLAN[k]
+            if final is not None:
+                r2["Exit_Price"] = final["fill"]
+                result = blended_result(r2)
+        sev = "act" if lines else "ok"
+        note = ""
+        if (not lines) and n_rec > res["hits"]:
+            note = "you took a partial before the rules triggered"
+        return dict(sev=sev, lines=lines, result=result, note=note)
+
+    @st.cache_data(ttl=900)
+    def get_position_bars(tickers, start_str):
+        return fetch_many_ohlc(list(tickers), start_str)
+
+    if operator and not open_df.empty:
+        st.markdown("<div class='ns-section' style='margin-top:18px;'>🛡️ Rules Check "
+                    "<span style='font-size:12px; font-weight:400; text-transform:none; letter-spacing:0; color:" + MUTED
+                    + ";'>&nbsp;operator only, not shown to readers</span></div>", unsafe_allow_html=True)
+        st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                    "Each open position is replayed against daily bars from the session after it was opened, using the "
+                    "stop and targets in your sheet. A bar that touches both the stop and a target counts as a stop, a "
+                    "level gapped through fills at the open, and the stop moves to breakeven once T1 prints. It applies "
+                    "the Stop in the sheet to the whole period, so if you trail stops by hand, hits before a raise can be "
+                    "off. Today's session is included as it stands. Percentages follow the 50 / 25 / 25 plan.</p>",
+                    unsafe_allow_html=True)
+
+        starts = open_df["Date_Opened_dt"].dropna() if "Date_Opened_dt" in open_df.columns else pd.Series(dtype="datetime64[ns]")
+        if starts.empty:
+            st.info("The rules check needs a Date_Opened on each open position.")
+        else:
+            start_str = (starts.min() - pd.Timedelta(days=3)).strftime("%Y-%m-%d")
+            bars_map = get_position_bars(tuple(sorted(open_df["Ticker"].unique())), start_str)
+            if not bars_map:
+                st.info("Price history could not be loaded right now. Reload in a minute.")
+            else:
+                body_rows, n_act = "", 0
+                for _, prow in open_df.iterrows():
+                    res = rules_check(prow, bars_map.get(prow["Ticker"]))
+                    side_txt = str(prow.get("Side", ""))
+                    opened_txt = prow["Date_Opened_dt"].strftime("%b %d") if pd.notna(prow.get("Date_Opened_dt")) else "?"
+                    if res["no_date"] or res["no_data"]:
+                        said = "Needs a Date_Opened" if res["no_date"] else "No price data"
+                        body_rows += ("<tr><td style='font-weight:700;'>" + prow["Ticker"] + "</td>"
+                                      "<td style='color:" + MUTED + ";'>" + side_txt + "</td>"
+                                      "<td style='color:" + MUTED + ";'>" + opened_txt + "</td>"
+                                      "<td colspan='6' style='color:" + MUTED + ";'>" + said + "</td></tr>")
+                        continue
+                    act = needs_action(res, prow)
+                    n_act += (act["sev"] == "act")
+
+                    parts = []
+                    for ev in res["events"]:
+                        parts.append("<span style='color:" + GREEN + ";font-weight:600;'>" + ev["label"] + " "
+                                     + ev["date"].strftime("%b %d") + ("</span> <span style='color:" + AMBER
+                                                                       + ";'>gap, filled at the open</span>" if ev["gapped"] else "</span>"))
+                    if res["stopped"]:
+                        s = res["stopped"]
+                        parts.append("<span style='color:" + RED + ";font-weight:600;'>"
+                                     + ("Breakeven stop " if s["breakeven"] else "Stop ") + s["date"].strftime("%b %d")
+                                     + "</span>" + (" <span style='color:" + AMBER + ";'>gapped through, filled at the open</span>"
+                                                    if s["gapped"] else ""))
+                    said = " then ".join(parts) if parts else "<span style='color:" + MUTED + ";'>Nothing triggered</span>"
+                    if act["note"]:
+                        said += " <span style='color:" + MUTED + ";'>(" + act["note"] + ")</span>"
+
+                    if act["lines"]:
+                        todo = "<br>".join(act["lines"])
+                    else:
+                        todo = "<span style='color:" + GREEN + ";'>Nothing to do</span>"
+                    resv = ("<span style='color:" + (GREEN if act["result"] >= 0 else RED) + ";font-weight:600;'>"
+                            + "{:+.1f}%".format(act["result"]) + "</span>") if act["result"] is not None else "<span style='color:" + MUTED + ";'>&mdash;</span>"
+                    last_txt = "{:,.2f}".format(res["last"]) if res["last"] is not None else "&mdash;"
+                    body_rows += ("<tr style='" + ("background:rgba(240,185,11,.06);" if act["sev"] == "act" else "") + "'>"
+                                  "<td style='font-weight:700;'>" + prow["Ticker"] + "</td>"
+                                  "<td style='color:" + MUTED + ";'>" + side_txt + "</td>"
+                                  "<td style='color:" + MUTED + ";'>" + opened_txt + "</td>"
+                                  "<td style='text-align:right;'>" + "{:,.2f}".format(float(prow["Entry"])) + "</td>"
+                                  "<td style='text-align:right;color:" + RED + ";'>" + "{:,.2f}".format(float(prow["Stop"])) + "</td>"
+                                  "<td style='text-align:right;'>" + last_txt + "</td>"
+                                  "<td>" + said + "</td>"
+                                  "<td style='font-size:12.5px;'>" + todo + "</td>"
+                                  "<td style='text-align:right;'>" + resv + "</td></tr>")
+
+                total = len(open_df)
+                if n_act:
+                    st.markdown("<div class='ns-panel' style='border-left:3px solid " + AMBER + ";'><span style='font-size:13.5px;"
+                                "color:#cdd8e4;'><strong>" + str(n_act) + " of " + str(total) + " open position"
+                                + ("" if total == 1 else "s") + " need" + ("s" if n_act == 1 else "")
+                                + " updating.</strong> The rules say a stop or target has traded that the sheet does not show "
+                                  "yet. The last column is what each trade would be worth if booked as shown.</span></div>",
+                                unsafe_allow_html=True)
+                else:
+                    st.markdown("<div class='ns-panel' style='border-left:3px solid " + GREEN + ";'><span style='font-size:13.5px;"
+                                "color:#cdd8e4;'><strong>All " + str(total) + " open positions are on plan.</strong> "
+                                "Nothing has traded through a stop or target that the sheet does not already show.</span></div>",
+                                unsafe_allow_html=True)
+                st.markdown("<style>.rcx{width:100%;border-collapse:collapse;background:#151b26;border:1px solid #232c3d;"
+                            "font-size:13.5px;font-family:'IBM Plex Mono',monospace;}"
+                            ".rcx th{font-family:'IBM Plex Sans',sans-serif;font-size:11.5px;text-transform:uppercase;"
+                            "letter-spacing:0.8px;color:#a8b6c6;padding:10px 12px;border-bottom:1px solid #232c3d;"
+                            "font-weight:600;text-align:left;}"
+                            ".rcx td{padding:9px 12px;border-bottom:1px solid #1c2434;color:#e6edf3;vertical-align:top;}"
+                            "</style><table class='rcx'><tr><th>Ticker</th><th>Side</th><th>Opened</th>"
+                            "<th style='text-align:right;'>Entry</th><th style='text-align:right;'>Stop</th>"
+                            "<th style='text-align:right;'>Last</th><th>The rules say</th><th>Enter in the sheet</th>"
+                            "<th style='text-align:right;'>If booked</th></tr>" + body_rows + "</table>",
+                            unsafe_allow_html=True)
+
     st.divider()
 
     # ---- Closed trades ----
@@ -1068,7 +1286,7 @@ elif page_selection == "Swing Book":
                                  paper_bgcolor=BG, plot_bgcolor="#10151f",
                                  margin=dict(l=10, r=10, t=44, b=10),
                                  yaxis=dict(ticksuffix="%", tickfont=dict(size=12)),
-                                 xaxis=dict(tickfont=dict(size=12)),
+                                 xaxis=dict(type="category", tickfont=dict(size=12)),
                                  legend=dict(orientation="h", y=1.0, x=0, bgcolor="rgba(0,0,0,0)", font=dict(size=12)))
                 st.plotly_chart(f1, theme=None, use_container_width=True)
             with pc2:
@@ -1082,7 +1300,7 @@ elif page_selection == "Swing Book":
                                  paper_bgcolor=BG, plot_bgcolor="#10151f",
                                  margin=dict(l=10, r=10, t=44, b=10),
                                  yaxis=dict(ticksuffix="%", tickfont=dict(size=12)),
-                                 xaxis=dict(tickfont=dict(size=12)),
+                                 xaxis=dict(type="category", tickfont=dict(size=12)),
                                  legend=dict(orientation="h", y=1.0, x=0, bgcolor="rgba(0,0,0,0)", font=dict(size=12)))
                 st.plotly_chart(f2, theme=None, use_container_width=True)
 
