@@ -2092,15 +2092,17 @@ elif page_selection == "Swing Screener":
         roll = series.rolling(w, center=True).max() if want_high else series.rolling(w, center=True).min()
         return series[(series == roll)].dropna()
 
-    def pick_targets(cands, atr, gap=1.0, n=3):
+    def pick_targets(cands, atr, gap=1.0, n=3, last=None):
         """Take targets nearest-first, skipping any closer than `gap` ATRs to the last one kept.
 
         Two pivots a few cents apart are one level, not two. Counting them twice makes the
-        scale-out plan sell most of the position at essentially the same price.
+        scale-out plan sell most of the position at essentially the same price. `last` lets a
+        second call carry on from targets already chosen.
         """
         out = []
         for x in cands:
-            if not out or abs(x - out[-1]) >= atr * gap:
+            ref = out[-1] if out else last
+            if ref is None or abs(x - ref) >= atr * gap:
                 out.append(x)
             if len(out) == n:
                 break
@@ -2174,8 +2176,10 @@ elif page_selection == "Swing Screener":
             if len(tg) < 3:
                 lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
                 rng = max(hi60 - lo60, px * 0.02)
-                fibs = [round(lo60 + rng * m, 2) for m in (1.272, 1.618, 2.0) if lo60 + rng * m > px * 1.005]
-                tg = pick_targets(sorted(set(cand + fibs)), atr)
+                fibs = sorted(set(round(lo60 + rng * m, 2) for m in (1.272, 1.618, 2.0) if lo60 + rng * m > px * 1.005))
+                if tg:
+                    fibs = [x for x in fibs if x > tg[-1]]      # only past the last real level
+                tg = tg + pick_targets(fibs, atr, n=3 - len(tg), last=tg[-1] if tg else None)
             if not tg:
                 return None
             rr = (tg[0] - px) / risk
@@ -2200,8 +2204,11 @@ elif page_selection == "Swing Screener":
             if len(tg) < 3:
                 lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
                 rng = max(hi60 - lo60, px * 0.02)
-                fibs = [round(hi60 - rng * m, 2) for m in (1.272, 1.618, 2.0) if 0 < hi60 - rng * m < px * 0.995]
-                tg = pick_targets(sorted(set(cand + fibs), reverse=True), atr)
+                fibs = sorted(set(round(hi60 - rng * m, 2) for m in (1.272, 1.618, 2.0) if 0 < hi60 - rng * m < px * 0.995),
+                              reverse=True)
+                if tg:
+                    fibs = [x for x in fibs if x < tg[-1]]      # only past the last real level
+                tg = tg + pick_targets(fibs, atr, n=3 - len(tg), last=tg[-1] if tg else None)
             if not tg:
                 return None
             rr = (px - tg[0]) / risk
