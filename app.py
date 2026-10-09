@@ -1957,7 +1957,7 @@ elif page_selection == "Swing Screener":
         st.sidebar.caption("Screener controls are locked. Add SCREENER_PASSCODE to the app secrets to unlock them.")
 
     # Defaults that the public view always uses
-    direction, risk_pct, min_rr, max_ext, min_dv, req_rs = "Long", 1.5, 2.0, 6.0, 20.0, True
+    direction, min_rr, max_ext, min_dv, req_rs = "Long", 2.0, 6.0, 20.0, True
     pos_cap, max_atr, pullback_win = 15.0, 15.0, 5
     lookback_sessions = 5
     min_stop_atr = 0.75
@@ -1967,7 +1967,6 @@ elif page_selection == "Swing Screener":
         c1, c2, c3 = st.columns(3)
         with c1:
             direction = st.radio("Setups", ["Long", "Short"], horizontal=True)
-            risk_pct = st.number_input("Risk per trade (% of book)", 0.25, 5.0, 1.5, 0.25)
         with c2:
             min_rr = st.number_input("Minimum R:R to T1", 1.0, 5.0, 2.0, 0.25)
             max_ext = st.number_input("Max distance from 21MA (%)", 2.0, 20.0, 6.0, 0.5)
@@ -1976,8 +1975,9 @@ elif page_selection == "Swing Screener":
             req_rs = st.checkbox("Require relative strength vs SPX (3 months)", value=True)
         c4, c5 = st.columns(2)
         with c4:
-            pos_cap = st.number_input("Max position size (% of book)", 5.0, 50.0, 15.0, 2.5,
-                                      help="A tight stop can justify an enormous position on paper. It cannot protect against a gap.")
+            pos_cap = st.number_input("Position size per candidate (% of book)", 5.0, 50.0, 15.0, 2.5,
+                                      help="Flat for every candidate. The Risk column shows what each stop-out "
+                                           "would cost at this size.")
         with c5:
             st.caption("Sector concentration is flagged on each row rather than filtered, so nothing "
                        "qualifying is hidden. The call is yours at the chart.")
@@ -2092,6 +2092,47 @@ elif page_selection == "Swing Screener":
         roll = series.rolling(w, center=True).max() if want_high else series.rolling(w, center=True).min()
         return series[(series == roll)].dropna()
 
+    def pick_targets(cands, atr, gap=1.0, n=3):
+        """Take targets nearest-first, skipping any closer than `gap` ATRs to the last one kept.
+
+        Two pivots a few cents apart are one level, not two. Counting them twice makes the
+        scale-out plan sell most of the position at essentially the same price.
+        """
+        out = []
+        for x in cands:
+            if not out or abs(x - out[-1]) >= atr * gap:
+                out.append(x)
+            if len(out) == n:
+                break
+        return out
+
+    def track_outcome(df, fired, entry, stop, tg, want_long):
+        """Walk forward bar by bar from the session after a setup fired.
+
+        Daily bars cannot show the order of events inside a day, so a bar that touches both
+        the stop and a target is scored as a stop. Once T1 fills the stop moves to breakeven,
+        matching the scale-out rule. Returns (label, targets_hit, finished).
+        """
+        n = len(tg)
+        stop_now, hits = stop, 0
+        for d, bar in df.iterrows():
+            if d.date() <= fired:
+                continue
+            hi, lo = float(bar["High"]), float(bar["Low"])
+            if (lo <= stop_now) if want_long else (hi >= stop_now):
+                if hits == 0:
+                    return "Stopped out", 0, True
+                return "T%d, then breakeven" % hits, hits, True
+            while hits < n and ((hi >= tg[hits]) if want_long else (lo <= tg[hits])):
+                hits += 1
+                if hits == 1:
+                    stop_now = entry
+            if hits == n:
+                return "All targets hit", hits, True
+        if hits == 0:
+            return "Open", 0, False
+        return "T%d hit, still open" % hits, hits, False
+
     def scan(t, df, want_long):
         c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
         px = float(c.iloc[-1])
@@ -2128,12 +2169,13 @@ elif page_selection == "Swing Screener":
             risk = px - stop
             if risk < atr * min_stop_atr:
                 return None
-            tg = sorted([float(x) for x in pivots(h.tail(160), 5, True).values if x > px * 1.005])[:3]
+            cand = sorted(set(round(float(x), 2) for x in pivots(h.tail(160), 5, True).values if x > px * 1.005))
+            tg = pick_targets(cand, atr)
             if len(tg) < 3:
                 lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
                 rng = max(hi60 - lo60, px * 0.02)
-                tg += [lo60 + rng * m for m in (1.272, 1.618, 2.0) if lo60 + rng * m > px * 1.005]
-                tg = sorted(set(round(x, 2) for x in tg))[:3]
+                fibs = [round(lo60 + rng * m, 2) for m in (1.272, 1.618, 2.0) if lo60 + rng * m > px * 1.005]
+                tg = pick_targets(sorted(set(cand + fibs)), atr)
             if not tg:
                 return None
             rr = (tg[0] - px) / risk
@@ -2152,12 +2194,14 @@ elif page_selection == "Swing Screener":
             risk = stop - px
             if risk < atr * min_stop_atr:
                 return None
-            tg = sorted([float(x) for x in pivots(l.tail(160), 5, False).values if x < px * 0.995], reverse=True)[:3]
+            cand = sorted(set(round(float(x), 2) for x in pivots(l.tail(160), 5, False).values if x < px * 0.995),
+                          reverse=True)
+            tg = pick_targets(cand, atr)
             if len(tg) < 3:
                 lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
                 rng = max(hi60 - lo60, px * 0.02)
-                tg += [hi60 - rng * m for m in (1.272, 1.618, 2.0) if 0 < hi60 - rng * m < px * 0.995]
-                tg = sorted(set(round(x, 2) for x in tg), reverse=True)[:3]
+                fibs = [round(hi60 - rng * m, 2) for m in (1.272, 1.618, 2.0) if 0 < hi60 - rng * m < px * 0.995]
+                tg = pick_targets(sorted(set(cand + fibs), reverse=True), atr)
             if not tg:
                 return None
             rr = (px - tg[0]) / risk
@@ -2167,10 +2211,11 @@ elif page_selection == "Swing Screener":
         atr_t1 = abs(tg[0] - px) / atr
         if atr_t1 > max_atr:
             return None
-        raw_size = risk_pct / (risk / px * 100.0) * 100.0
+        # Flat sizing: every candidate gets the same share of the book, so the risk on each
+        # trade is whatever its stop distance makes it. The Risk column shows that figure.
         return dict(t=t, sec=UNIVERSE_SECTORS.get(t, "Other"), px=px, stop=stop, tg=tg, rr=rr,
-                    ext=ext, rs=rs, atr=atr, atr_t1=atr_t1, stop_atr=risk / atr, raw=raw_size,
-                    size=min(raw_size, pos_cap), capped=raw_size > pos_cap)
+                    ext=ext, rs=rs, atr=atr, atr_t1=atr_t1, stop_atr=risk / atr,
+                    raw=float(pos_cap), size=float(pos_cap), capped=False)
 
     def drop_reason(t, df, want_long):
         """First condition today's bar fails, plus whether the trend itself still holds.
@@ -2279,7 +2324,8 @@ elif page_selection == "Swing Screener":
         rows = ""
         for r in chosen:
             t1, t2, t3 = (list(r["tg"]) + [None, None, None])[:3]
-            sz = "{:.1f}%".format(r["size"]) + ("*" if r["capped"] else "")
+            sz = "{:.1f}%".format(r["size"])
+            rk_val = r["size"] * abs(r["px"] - r["stop"]) / r["px"]   # % of book lost if the stop is hit
             _shares = {"50 / 25 / 25": (50, 25, 25), "All out at T1": (100, 0, 0),
                        "Thirds": (33, 33, 34), "50 / 50 at T2": (50, 50, 0)}[scale_plan]
             _plan = " / ".join(str(s) + "%" for s in _shares if s > 0)
@@ -2301,6 +2347,7 @@ elif page_selection == "Swing Screener":
                      "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:,.2f}".format(t3) if t3 else "—") + "</td>"
                      "<td style='text-align:right;font-weight:700;color:" + AMBER + ";'>" + "{:.1f}".format(r["rr"]) + "</td>"
                      "<td style='text-align:right;'>" + sz + "</td>"
+                     "<td style='text-align:right;color:" + MUTED + ";'>" + "{:.2f}%".format(rk_val) + "</td>"
                      "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(r["ext"]) + "</td>"
                      "<td style='text-align:right;color:" + (AMBER if r["stop_atr"] < 1.0 else MUTED) + ";'>"
                      + "{:.2f}".format(r["stop_atr"]) + "</td>"
@@ -2312,7 +2359,8 @@ elif page_selection == "Swing Screener":
                     "<th style='text-align:right;'>Entry</th><th style='text-align:right;'>Stop</th>"
                     "<th style='text-align:right;'>T1</th><th style='text-align:right;'>T2</th>"
                     "<th style='text-align:right;'>T3</th><th style='text-align:right;'>R:R</th>"
-                    "<th style='text-align:right;'>Size</th><th style='text-align:right;'>vs 21MA</th>"
+                    "<th style='text-align:right;'>Size</th><th style='text-align:right;'>Risk</th>"
+                    "<th style='text-align:right;'>vs 21MA</th>"
                     "<th style='text-align:right;'>Stop ATRs</th><th style='text-align:right;'>ATRs to T1</th>"
                     "<th style='text-align:right;'>Scale out</th>"
                     "</tr>" + rows + "</table>", unsafe_allow_html=True)
@@ -2342,10 +2390,9 @@ elif page_selection == "Swing Screener":
                     + "</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='ns-panel' style='margin-top:8px;border-left:3px solid " + BLUE + ";'>"
-                    "<span style='font-size:13.5px;color:#cdd8e4;'><strong>Size</strong> is the position as a percentage "
-                    "of the book so that a stop-out costs about " + "{:.2f}%".format(risk_pct) + " of it. A wide stop "
-                    "earns a small position, which keeps risk constant instead of letting the stop distance set it. "
-                    "An asterisk means the risk math justified more but the position cap applied. <strong>Stops</strong> "
+                    "<span style='font-size:13.5px;color:#cdd8e4;'><strong>Size</strong> is a flat share of the book for every candidate, so the risk on each trade depends on how far its stop sits. "
+                    "<strong>Risk</strong> is what a stop-out would cost as a percentage of the book: a tight stop risks little but is easier for ordinary noise to take out, so read it alongside Stop ATRs. "
+                    "<strong>Stops</strong> "
                     "sit under the swing low that produced the pullback; <strong>targets</strong> are prior pivot highs, "
                     "or fib extensions where price is in blue sky. A row marked <strong>IN BOOK</strong> is a position you "
                     "already hold: its entry and targets are recalculated from the latest close, so they will not "
@@ -2359,18 +2406,16 @@ elif page_selection == "Swing Screener":
                     "ratio does.</span></div>", unsafe_allow_html=True)
 
     # ---- What fired earlier in the week ----
-    # Nothing is stored: the same rules are simply re-run against each earlier close,
-    # so a setup that appeared while you were away is reproduced with that day's numbers.
+    # Nothing is stored: the same rules are re-run against each earlier close, oldest first,
+    # so each name is dated by the first session it appeared, and then walked forward to see
+    # what price did next.
     if int(lookback_sessions) > 1:
         prior = {}
-        for k in range(1, int(lookback_sessions)):
-            day_label = None
+        for k in reversed(range(1, int(lookback_sessions))):
             for t, df in data.items():
                 if len(df) <= 130 + k:
                     continue
                 sub = df.iloc[:-k]
-                if day_label is None:
-                    day_label = sub.index[-1].date()
                 try:
                     r = scan(t, sub, want_long)
                 except Exception:
@@ -2378,6 +2423,13 @@ elif page_selection == "Swing Screener":
                 if r and t not in prior:
                     r["fired"] = sub.index[-1].date()
                     prior[t] = r
+
+        for t, r in prior.items():
+            df_t = data[t]
+            r["outcome"], r["hits"], r["done"] = track_outcome(df_t, r["fired"], r["px"], r["stop"], r["tg"], want_long)
+            lc = float(df_t["Close"].iloc[-1])
+            r["now"] = ((lc - r["px"]) / r["px"] * 100.0) if want_long else ((r["px"] - lc) / r["px"] * 100.0)
+
         today_set = {r["t"] for r in chosen}
         missed = []
         for t, r in prior.items():
@@ -2388,17 +2440,35 @@ elif page_selection == "Swing Screener":
             except Exception:
                 r["why"], r["trend_ok"] = "No longer qualifies", False
             missed.append(r)
-        missed.sort(key=lambda r: (not r.get("trend_ok", False), -r["fired"].toordinal(), -r["rr"]))
+        # still-live setups first, then the finished ones, newest first within each
+        missed.sort(key=lambda r: (r["done"], -r["fired"].toordinal(), -r["rr"]))
 
-        st.markdown("<div class='ns-section' style='margin-top:22px;'>🗓️ Fired Earlier, Gone Today</div>",
+        st.markdown("<div class='ns-section' style='margin-top:22px;'>🗓️ Earlier Setups, And What Happened Since</div>",
                     unsafe_allow_html=True)
         st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                     "Setups that qualified on one of the last " + str(int(lookback_sessions) - 1)
-                    + " sessions but no longer do, shown with the numbers they had that day. "
-                      "Useful after a few days away, but treat them as history: the entry is that session's close, "
-                      "not a live price. <strong>Trend intact</strong> means the name still sits the right side of "
-                      "its 21MA and 50MA and is worth a chart; <strong>Invalidated</strong> means the structure "
-                      "that justified the setup has gone.</p>", unsafe_allow_html=True)
+                    + " sessions, dated by the first day each appeared and shown with that day's numbers. "
+                      "<strong>Outcome</strong> walks price forward from the next session using the same stop and "
+                      "targets: <strong>Open</strong> means neither the stop nor T1 has been touched, so the setup is "
+                      "still live; the stop moves to breakeven once T1 fills. <strong>Now</strong> is the move from that "
+                      "day's close to the latest close. The entry is that session's close, not a live price.</p>",
+                    unsafe_allow_html=True)
+
+        allp = list(prior.values())
+        if allp:
+            n_all = len(allp)
+            n_stop = sum(1 for r in allp if r["done"] and r["hits"] == 0)
+            n_reach = sum(1 for r in allp if r["hits"] >= 1)
+            n_open = sum(1 for r in allp if (not r["done"]) and r["hits"] == 0)
+            st.markdown("<div class='ns-panel' style='border-left:3px solid " + BLUE + ";'>"
+                        "<span style='font-size:13.5px;color:#cdd8e4;'><strong>Of the " + str(n_all)
+                        + " setups that fired in this window</strong> (including any still on today's list), "
+                        + str(n_stop) + " " + ("was" if n_stop == 1 else "were") + " stopped out, "
+                        + str(n_reach) + " reached T1 or better, and " + str(n_open) + " "
+                        + ("is" if n_open == 1 else "are") + " still open. This is a hypothetical scorecard: it assumes "
+                          "entry at that day's close and scores any bar that touches both the stop and a target as a "
+                          "stop. A few sessions is a trend to watch, not a verdict.</span></div>",
+                        unsafe_allow_html=True)
 
         if not missed:
             st.info("Nothing fired earlier in the window that is not still on the list above.")
@@ -2410,6 +2480,14 @@ elif page_selection == "Swing Screener":
                 if r["t"] in open_book:
                     held_chip = ("<span style='border:1px solid " + AMBER + "; color:" + AMBER + "; font-size:9.5px; "
                                  "font-weight:600; padding:1px 6px; border-radius:4px; margin-left:8px;'>IN BOOK</span>")
+                if r["hits"] == 0 and r["done"]:
+                    o_col = RED
+                elif r["hits"] >= 1 and not r["done"]:
+                    o_col = GREEN
+                elif r["hits"] >= 1:
+                    o_col = GREEN if r["outcome"] == "All targets hit" else AMBER
+                else:
+                    o_col = TEXT
                 rows2 += ("<tr><td style='font-weight:700;'>" + r["t"] + held_chip + "</td>"
                           "<td style='color:" + MUTED + ";'>" + r["sec"] + "</td>"
                           "<td style='color:" + MUTED + ";'>" + r["fired"].strftime("%a %b %d") + "</td>"
@@ -2417,16 +2495,16 @@ elif page_selection == "Swing Screener":
                           "<td style='text-align:right;color:" + RED + ";'>" + "{:,.2f}".format(r["stop"]) + "</td>"
                           "<td style='text-align:right;color:" + GREEN + ";'>" + "{:,.2f}".format(t1) + "</td>"
                           "<td style='text-align:right;font-weight:700;color:" + AMBER + ";'>" + "{:.1f}".format(r["rr"]) + "</td>"
-                          "<td style='text-align:right;color:" + MUTED + ";'>" + "{:.2f}".format(r["stop_atr"]) + "</td>"
-                          "<td style='color:" + (GREEN if r["trend_ok"] else RED) + ";font-weight:600;'>"
-                          + ("Trend intact" if r["trend_ok"] else "Invalidated") + "</td>"
+                          "<td style='color:" + o_col + ";font-weight:600;'>" + r["outcome"] + "</td>"
+                          "<td style='text-align:right;font-weight:600;color:" + (GREEN if r["now"] >= 0 else RED) + ";'>"
+                          + "{:+.1f}%".format(r["now"]) + "</td>"
                           "<td style='color:" + MUTED + ";'>" + r["why"] + "</td></tr>")
             st.markdown("<table class='ns-tbl'><tr>"
                         "<th style='text-align:left;'>Ticker</th><th style='text-align:left;'>Sector</th>"
                         "<th style='text-align:left;'>Fired</th><th style='text-align:right;'>Entry that day</th>"
                         "<th style='text-align:right;'>Stop</th><th style='text-align:right;'>T1</th>"
-                        "<th style='text-align:right;'>R:R</th><th style='text-align:right;'>Stop ATRs</th>"
-                        "<th style='text-align:left;'>Status</th><th style='text-align:left;'>Why it dropped</th>"
+                        "<th style='text-align:right;'>R:R</th><th style='text-align:left;'>Outcome</th>"
+                        "<th style='text-align:right;'>Now</th><th style='text-align:left;'>Why it dropped</th>"
                         "</tr>" + rows2 + "</table>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
