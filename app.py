@@ -117,18 +117,18 @@ def fetch_many_closes(tickers, start_str, end_str):
         return None
     return pd.DataFrame(cols)
 
-def fetch_many_ohlc(tickers, start_str):
+def fetch_many_ohlc(tickers, start_str, adjusted=False):
     """{ticker: DataFrame[Open, High, Low, Close]} of daily bars up to today, in ONE request.
 
-    Raw (unadjusted) prices, because stops and targets are set against the prices that
-    actually traded, not prices restated for later dividends.
+    Raw (unadjusted) prices by default, because stops and targets are set against the prices that
+    actually traded. Pass adjusted=True for moving averages and pivots, which want a continuous series.
     """
     if not tickers:
         return {}
     try:
         data = _fetch_with_retry(lambda: yf.download(
             tickers=" ".join(tickers), start=start_str, interval="1d",
-            group_by="ticker", auto_adjust=False, progress=False, threads=False))
+            group_by="ticker", auto_adjust=bool(adjusted), progress=False, threads=False))
     except Exception:
         return {}
     if data is None or len(data) == 0:
@@ -240,6 +240,132 @@ def find_reclaim(day_bars, edge, is_support):
             if swept and cl <= edge:
                 return dict(price=cl, ts=ts)
     return None
+
+def swing_pivots(series, lr=5, want_high=True):
+    """Local extremes: a bar that is the highest (or lowest) of the bars either side of it."""
+    w = lr * 2 + 1
+    roll = series.rolling(w, center=True).max() if want_high else series.rolling(w, center=True).min()
+    return series[(series == roll)].dropna()
+
+def watch_state(df, is_long, ext_max=6.0, win=5):
+    """Where a name stands against the swing screener's setup, and the price that would put it there.
+
+    The screener wants an established trend, a close within ext_max% of the 21MA, and a dip through the
+    21MA inside the last `win` sessions that price has since closed back from. A name that is not there yet
+    has a specific price at which it would be: the 21MA (a pullback for a long, a bounce for a short), or
+    the 50MA when the trend itself is missing. Returns None when there is not enough history.
+    """
+    if df is None:
+        return None
+    df = df.dropna(subset=["Close", "High", "Low"])
+    if len(df) < 60:
+        return None
+    c = df["Close"]
+    e21 = c.ewm(span=21, adjust=False).mean()
+    s50 = c.rolling(50).mean()
+    px, m21, m50 = float(c.iloc[-1]), float(e21.iloc[-1]), float(s50.iloc[-1])
+    if pd.isna(m50):
+        return None
+    ext = (px / m21 - 1.0) * 100.0
+    w = int(win)
+    if is_long:
+        in_trend = px > m21 > m50 and px > m50
+        fired = bool((df["Low"].iloc[-w:] < e21.iloc[-w:]).any())
+    else:
+        in_trend = px < m21 < m50 and px < m50
+        fired = bool((df["High"].iloc[-w:] > e21.iloc[-w:]).any())
+    near = abs(ext) <= ext_max
+
+    trigger = None
+    if in_trend and near and fired:
+        state, label = "now", "At the 21MA now"
+    elif in_trend and not near:
+        state, label, trigger = "extended", ("Extended" if is_long else "Extended down"), m21
+    elif in_trend:
+        state, label, trigger = "coiling", ("Above the 21MA" if is_long else "Below the 21MA"), m21
+    elif is_long and px > m50 and m21 > m50:
+        state, label, trigger = "below", "Under the 21MA", m21
+    elif (not is_long) and px < m50 and m21 < m50:
+        state, label, trigger = "below", "Over the 21MA", m21
+    elif is_long and px > m50 and m21 <= m50:
+        # price is already above both averages; what is missing is the 21MA crossing above the 50MA
+        state, label = "notstacked", "Averages not stacked"
+    elif (not is_long) and px < m50 and m21 >= m50:
+        state, label = "notstacked", "Averages not stacked"
+    else:
+        state, label = "notrend", ("Not in an uptrend" if is_long else "Not in a downtrend")
+        trigger = max(m21, m50) if is_long else min(m21, m50)
+
+    entry = px if trigger is None else trigger
+    if is_long:
+        cand = sorted(round(float(x), 2) for x in swing_pivots(df["High"].tail(160), 5, True).values if x > entry * 1.005)
+        t1 = cand[0] if cand else None
+        room = ((t1 / entry - 1.0) * 100.0) if t1 else None
+    else:
+        cand = sorted((round(float(x), 2) for x in swing_pivots(df["Low"].tail(160), 5, False).values if x < entry * 0.995),
+                      reverse=True)
+        t1 = cand[0] if cand else None
+        room = ((1.0 - t1 / entry) * 100.0) if t1 else None
+    away = 0.0 if trigger is None else (trigger / px - 1.0) * 100.0
+    return dict(px=px, m21=m21, m50=m50, ext=ext, state=state, label=label, trigger=trigger,
+                away=away, t1=t1, room=room, fired=fired)
+
+def rolling_followthrough(ohlc, idx_df, n_pairs=12, top=6, today=None):
+    """Does one week's strength (or weakness) carry into the next? Re-run over many weeks at once.
+
+    Weeks run Monday's open to Friday's close, as on the movers board. For each of the last `n_pairs`
+    completed weeks, the `top` biggest gainers and losers are ranked, then followed through the NEXT week
+    and compared with the index. Nothing is stored: every week is recomputed from the same daily bars.
+    Returns None when there is not enough history.
+    """
+    td = pd.Timestamp(today) if today is not None else pd.Timestamp.now()
+    if td.tzinfo is not None:
+        td = td.tz_localize(None)
+    td = td.normalize()
+
+    def weekly(df):
+        d = df[["Open", "Close"]].dropna().copy()
+        ix = d.index
+        if getattr(ix, "tz", None) is not None:
+            ix = ix.tz_localize(None)
+        d.index = pd.DatetimeIndex(ix).normalize()
+        if len(d) == 0:
+            return pd.Series(dtype=float)
+        g = d.resample("W-FRI")
+        wk = pd.DataFrame({"open": g["Open"].first(), "close": g["Close"].last()}).dropna()
+        last_bar = d.index.max()
+        keep = [lab for lab in wk.index if lab <= last_bar or lab < td]   # the Friday has printed or passed
+        wk = wk.loc[keep]
+        return (wk["close"] / wk["open"] - 1.0) * 100.0
+
+    R = pd.DataFrame({t: weekly(df) for t, df in ohlc.items() if df is not None and len(df)})
+    I = weekly(idx_df)
+    if R.empty or I.empty:
+        return None
+    weeks = [w for w in R.index if w in I.index][-(int(n_pairs) + 1):]
+    rows = []
+    for w0, w1 in zip(weeks[:-1], weeks[1:]):
+        r0, r1 = R.loc[w0], R.loc[w1]
+        ok = r0.notna() & r1.notna()
+        r0, r1 = r0[ok], r1[ok]
+        if len(r0) < top * 2:
+            continue
+        ranked = r0.sort_values(ascending=False)
+        lead, lag = list(ranked.index[:top]), list(ranked.index[-top:])
+        i1 = float(I.loc[w1])
+        L, G = r1[lead], r1[lag]
+        rows.append(dict(w0=w0, w1=w1, lead_next=float(L.mean()), lag_next=float(G.mean()), idx_next=i1,
+                         lead_beat=int((L > i1).sum()), lag_trail=int((G < i1).sum()), top=top,
+                         leaders=lead, laggards=lag))
+    if not rows:
+        return None
+    n = len(rows)
+    return dict(rows=rows, n=n, top=top, names=n * top,
+                ex_lead=sum(r["lead_next"] - r["idx_next"] for r in rows) / n,
+                ex_lag=sum(r["lag_next"] - r["idx_next"] for r in rows) / n,
+                lead_beat=sum(r["lead_beat"] for r in rows), lag_trail=sum(r["lag_trail"] for r in rows),
+                weeks_lead_beat=sum(1 for r in rows if r["lead_next"] > r["idx_next"]),
+                weeks_lag_trail=sum(1 for r in rows if r["lag_next"] < r["idx_next"]))
 
 def level_name(is_sup, bottom, top, label=""):
     txt = ("S " if is_sup else "R ")
@@ -1731,9 +1857,6 @@ elif page_selection == "Weekly Recap":
                               "<td style='text-align:right;font-weight:700;color:"
                               + ((GREEN if s["pts"] >= 0 else RED) if s["pts"] is not None else MUTED) + ";'>"
                               + ("{:+,.0f}".format(s["pts"]) if s["pts"] is not None else "&mdash;") + "</td></tr>")
-            best = setups[0]
-            measured = [s for s in setups if s["pts"] is not None]
-            total_pts = sum(s["pts"] for s in measured)
             st.markdown("<div class='ns-section' style='margin-top:18px;'>🎯 Setups That Fired</div>",
                         unsafe_allow_html=True)
             st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
@@ -1748,28 +1871,7 @@ elif page_selection == "Weekly Recap":
                         "<th style='text-align:right;'>Reclaimed</th>"
                         "<th style='text-align:right;'>Close</th><th style='text-align:right;'>Points</th>"
                         "</tr>" + rows_html + "</table>", unsafe_allow_html=True)
-            _best_txt = ""
-            if best["pts"] is not None:
-                _best_txt = (" The best was the " + ("look below and fail at " if best["sup"] else "look above and fail at ")
-                             + ("{:,.0f}".format(best["zone"][0]) if abs(best["zone"][1] - best["zone"][0]) < 0.5
-                                else "{:,.0f} – {:,.0f}".format(best["zone"][0], best["zone"][1]))
-                             + " on " + best["day"].strftime("%A") + ", worth " + "{:+,.0f}".format(best["pts"]) + " points.")
-            st.markdown("<div class='ns-panel' style='margin-top:8px; border-left:3px solid " + AMBER + ";'>"
-                        "<span style='font-size:13.5px; color:#cdd8e4;'><strong>"
-                        + str(len(setups)) + " setup" + ("" if len(setups) == 1 else "s")
-                        + " fired at published levels this week.</strong> Entering on the reclaim and holding to the close, "
-                        + (("they were worth " + "{:+,.0f}".format(total_pts) + " points in total.") if measured
-                           else "none had a clean 15-minute reclaim to measure from.")
-                        + _best_txt + "</span></div>", unsafe_allow_html=True)
 
-        if flips:
-            st.markdown("<div class='ns-panel' style='margin-top:8px; border-left:3px solid " + AMBER + ";'>"
-                        "<span style='font-size:13.5px; color:#cdd8e4;'><strong>" + str(flips) + " level "
-                        + ("test" if flips == 1 else "tests") + " came from the opposite side.</strong> "
-                        "SPX levels are set before the cash open, so a gap can turn a published support into "
-                        "resistance (or the reverse) before the bell. Those are marked with an asterisk, and they "
-                        "still count: the price mattered, just from the other direction.</span></div>",
-                        unsafe_allow_html=True)
     # ---------- 2. Where the week was fought (time at price) ----------
     st.markdown("<div class='ns-section'>📊 Where The Week Was Fought</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
@@ -1866,12 +1968,21 @@ elif page_selection == "Weekly Recap":
                 "Ranked by size of move, Monday\u2019s open to the latest print. The board reshuffles as the week goes on.</p>", unsafe_allow_html=True)
     mv = get_week_change(WATCHLIST, s_str, e_str)
 
+    # One download of daily bars feeds both the trend chips on this board and the watchlist below,
+    # instead of fetching the same 34 tickers twice.
     @st.cache_data(ttl=1800)
-    def get_hist_closes(tickers, end_str):
-        start = (pd.Timestamp(end_str) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
-        return fetch_many_closes(list(tickers), start, end_str)
+    def get_watch_ohlc(tickers, start_str):
+        return fetch_many_ohlc(list(tickers), start_str, adjusted=True)
 
-    hist = get_hist_closes(tuple(WATCHLIST), e_str)
+    _wstart = (pd.Timestamp(e_str) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+    try:
+        wo = get_watch_ohlc(tuple(WATCHLIST), _wstart)
+    except Exception:
+        wo = {}
+    # The chips describe the selected week, so they use closes only up to that week's end (the end date is
+    # exclusive, as it was when this was a separate download). The watchlist below uses the latest data.
+    _hist_end = pd.Timestamp(e_str)
+    hist = (pd.DataFrame({t_: d_["Close"].loc[d_.index < _hist_end] for t_, d_ in wo.items()}) if wo else None)
 
     def trend_character(tkr):
         """Where a name sits against its own moving averages, and how stretched it is.
@@ -1955,195 +2066,170 @@ elif page_selection == "Weekly Recap":
         with mc2:
             st.markdown(mover_panel("Laggards", laggards, RED), unsafe_allow_html=True)
 
-    # ---------- 6. Day-by-day consistency ----------
-    st.markdown("<div class='ns-section'>📆 Most Consistent, Day By Day</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Ranked by how many sessions a name finished in the top or bottom five, not by the size of its move. "
-                "A steady name can rank here without making the movers board above, and a one-day spike can do the reverse. "
-                "Week figures match that board.</p>",
-                unsafe_allow_html=True)
-
+    # ---------- 6. Pullback watchlist ----------
     @st.cache_data(ttl=1800)
-    def get_week_closes(tickers, start_str, end_str):
-        return fetch_many_closes(list(tickers), start_str, end_str)
+    def get_spx_daily(start_str):
+        h = fetch_history("^SPX", start=start_str, interval="1d")
+        return h[["Open", "Close"]].dropna() if (h is not None and len(h)) else None
 
-    # Reach back a week so the first session has a prior close to measure against
-    closes = get_week_closes(tuple(WATCHLIST),
-                             (week_start - pd.Timedelta(days=7)).strftime("%Y-%m-%d"), e_str)
+    def _settled(df):
+        """Drop today's bar while the session is open, so the levels below do not move with the tape."""
+        if df is not None and len(df) and session_open and df.index[-1].date() == today_date:
+            return df.iloc[:-1]
+        return df
 
-    if closes is None or closes.empty:
-        st.info("Daily data for the watchlist isn't available right now.")
-    else:
-        pct_all = closes.pct_change() * 100.0
-        in_week = [i for i, d in enumerate(pct_all.index)
-                   if week_start.date() <= d.date() <= week_end.date()]
-        pct = pct_all.iloc[in_week].dropna(how="all") if in_week else pct_all.iloc[0:0]
-
-        if len(pct) == 0:
-            st.info("No completed sessions in the selected week yet.")
-        else:
-            # The movers board above measures Monday's OPEN to Friday's close. Daily
-            # close-to-close changes would instead carry in the weekend gap, which made
-            # the two tables disagree on the same stock's week. Take the week figure from
-            # the same source the movers board uses, then restate Monday's cell as
-            # open-to-close so the row compounds back to exactly that number.
-            wk_chg = mv if mv else {}
-            for t in list(pct.columns):
-                w = wk_chg.get(t)
-                if w is None:
-                    continue
-                rest = 1.0
-                for d in pct.index[1:]:
-                    v = pct.loc[d, t]
-                    if pd.notna(v):
-                        rest *= (1 + v / 100.0)
-                if rest:
-                    pct.loc[pct.index[0], t] = ((1 + w / 100.0) / rest - 1) * 100.0
-            cum = pd.Series({t: wk_chg.get(t, float("nan")) for t in pct.columns})
-            pct = pct[[t for t in pct.columns if pd.notna(cum[t])]]
-            cum = cum.dropna()
-            if pct.empty:
-                st.info("Weekly figures for the watchlist aren't available right now.")
-                st.stop()
-
-            TOPN = 5
-            led = {t: 0 for t in pct.columns}
-            lag = {t: 0 for t in pct.columns}
-            for _, row in pct.iterrows():
-                r = row.dropna().sort_values(ascending=False)
-                if len(r) < TOPN * 2:
-                    continue
-                for t in r.index[:TOPN]:
-                    led[t] += 1
-                for t in r.index[-TOPN:]:
-                    lag[t] += 1
-            n_sessions = len(pct)
-            day_names = [d.strftime("%a") for d in pct.index]
-            mx = max(pct.abs().max().max(), 0.1)
-
-            def consistency_panel(title, tally, ascending, accent):
-                names = [t for t, c in tally.items() if c > 0]
-                names.sort(key=lambda t: (-tally[t], cum[t] if ascending else -cum[t]))
-                names = names[:6]
-                if not names:
-                    return ""
-                head = ("<tr><th style='text-align:left;width:74px;'>" + title + "</th>")
-                for dn in day_names:
-                    head += "<th>" + dn + "</th>"
-                head += "<th style='text-align:right;'>Week</th><th style='text-align:right;'>Days</th></tr>"
-                body = ""
-                for t in names:
-                    row = "<td class='tk'>" + t + "</td>"
-                    for d in pct.index:
-                        v = pct.loc[d, t]
-                        if pd.isna(v):
-                            bgc, fgc, txt = "#141a24", "#3d4757", "\u2014"
-                        else:
-                            inten = min(0.55, 0.10 + abs(v) / mx * 0.45)
-                            bgc = ("rgba(38,166,154,%.2f)" % inten) if v >= 0 else ("rgba(239,83,80,%.2f)" % inten)
-                            fgc = GREEN if v >= 0 else RED
-                            txt = "{:+.1f}".format(v)
-                        row += ("<td><span style='display:block;height:28px;line-height:28px;border-radius:5px;background:"
-                                + bgc + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:13px;"
-                                "font-weight:600;'>" + txt + "</span></td>")
-                    wk = float(cum[t])
-                    streak = tally[t] == n_sessions and n_sessions > 1
-                    row += ("<td style='text-align:right;font-family:IBM Plex Mono,monospace;font-size:14px;"
-                            "font-weight:600;color:" + (GREEN if wk >= 0 else RED) + ";'>" + "{:+.1f}%".format(wk) + "</td>")
-                    row += ("<td style='text-align:right;font-family:IBM Plex Mono,monospace;font-size:13px;color:"
-                            + (AMBER if streak else MUTED) + ";font-weight:" + ("700" if streak else "500") + ";'>"
-                            + str(tally[t]) + "/" + str(n_sessions) + ("  \u2605" if streak else "") + "</td>")
-                    body += "<tr>" + row + "</tr>"
-                return ("<table class='cs'>" + head + body + "</table>")
-
-            css = ("<style>.cs{width:100%;border-collapse:collapse;margin-bottom:6px}"
-                   ".cs th{font-size:11.5px;text-transform:uppercase;letter-spacing:0.7px;color:" + MUTED
-                   + ";padding:0 4px 9px;font-weight:600;text-align:center}"
-                   ".cs td{padding:4px 3px;text-align:center}"
-                   ".cs td.tk{text-align:left;font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:15px;color:"
-                   + TEXT + "}</style>")
-
-            lead_tbl = consistency_panel("Leaders", led, False, GREEN)
-            lag_tbl = consistency_panel("Laggards", lag, True, RED)
-            st.markdown("<div class='ns-panel'>" + css + lead_tbl + "</div>", unsafe_allow_html=True)
-            st.markdown("<div class='ns-panel'>" + css + lag_tbl + "</div>", unsafe_allow_html=True)
-
-            # Call out anything that never left the top or bottom five
-            perfect_up = [t for t, c in led.items() if c == n_sessions and n_sessions > 1]
-            perfect_dn = [t for t, c in lag.items() if c == n_sessions and n_sessions > 1]
-            if perfect_up or perfect_dn:
-                bits = []
-                if perfect_up:
-                    bits.append("<strong style='color:" + GREEN + ";'>" + ", ".join(sorted(perfect_up))
-                                + "</strong> finished in the top five every session")
-                if perfect_dn:
-                    bits.append("<strong style='color:" + RED + ";'>" + ", ".join(sorted(perfect_dn))
-                                + "</strong> finished in the bottom five every session")
-                st.markdown("<div class='ns-panel' style='border-left:3px solid " + AMBER + ";'>"
-                            "<span style='font-size:13.5px;color:#cdd8e4;'>Persistent all week: "
-                            + "; ".join(bits) + ". That is trend, not noise.</span></div>", unsafe_allow_html=True)
-
-    # ---------- 7. Did last week's movers follow through? ----------
-    st.markdown("<div class='ns-section'>🔁 Did Last Week's Movers Follow Through?</div>", unsafe_allow_html=True)
+    st.markdown("<div class='ns-section'>🎯 Pullback Watchlist</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Last week's biggest movers, and what they actually did this week. "
-                "A leaders board only means something if strength carries.</p>", unsafe_allow_html=True)
+                "A strong stock runs away from its 21MA and a weak one runs away from its own, so the week's biggest "
+                "movers are rarely at an entry. Each one here has the price that would put it in range: a pullback to the "
+                "21MA for a long, a bounce to it for a short, or the 50MA when the trend itself is missing. Set a price "
+                "alert at that level. When it is reached and the stock closes back through it, the Swing Screener page "
+                "tests it against the full rules (relative strength, reward to risk, stop distance), so a level here is a "
+                "place to look, not a signal, and earnings dates are still yours to check. <strong>From here</strong> is the move needed to reach the level. "
+                "<strong>Room to T1</strong> is the distance from that level to the nearest pivot, the target the screener "
+                "would use. The 21MA moves every day, so these levels do too.</p>", unsafe_allow_html=True)
 
-    pw_start = week_start - pd.Timedelta(weeks=1)
-    pw_end = week_end - pd.Timedelta(weeks=1)
-    pw_chg = get_week_change(WATCHLIST, pw_start.strftime("%Y-%m-%d"),
-                             (pw_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
-
-    if not pw_chg or not mv:
-        st.info("Not enough history to compare the two weeks yet.")
+    if not mv or not wo:
+        st.info("Price history for the watchlist is not available right now.")
     else:
-        pw_rank = sorted(pw_chg.items(), key=lambda kv: -kv[1])
-        prior_lead = [t for t, _ in pw_rank[:6] if t in mv]
-        prior_lag = [t for t, _ in pw_rank[-6:][::-1] if t in mv]
+        def _wl_rows(items, is_long):
+            out = []
+            for tkr, wkpct in items:
+                if tkr not in wo:
+                    continue
+                s_ = watch_state(_settled(wo[tkr]), is_long)
+                if s_:
+                    out.append((tkr, wkpct, s_))
+            out.sort(key=lambda r: (0 if r[2]["state"] == "now" else (3 if r[2]["state"] in ("notrend", "notstacked") else 1),
+                                    abs(r[2]["away"])))
+            return out
 
-        def follow_table(title, names, was_up):
-            if not names:
+        def _wl_table(title, rows, is_long):
+            if not rows:
                 return ""
-            rows = ""
-            for t in names:
-                last, now = pw_chg[t], mv[t]
-                carried = (now > 0) if was_up else (now < 0)
-                if abs(now) < 0.5:
-                    verdict, vcol = "Stalled", MUTED
-                elif carried:
-                    verdict, vcol = "Continued", GREEN
+            chip_col = {"now": GREEN, "coiling": BLUE, "extended": AMBER, "below": AMBER, "notrend": MUTED,
+                        "notstacked": MUTED}
+            body = ""
+            for tkr, wkpct, s_ in rows:
+                col = chip_col[s_["state"]]
+                chip = ("<span style='border:1px solid " + col + ";color:" + col + ";font-size:10.5px;font-weight:600;"
+                        "padding:1px 7px;border-radius:4px;white-space:nowrap;'>" + s_["label"] + "</span>")
+                trig = "{:,.2f}".format(s_["trigger"]) if s_["trigger"] is not None else ""
+                if s_["state"] == "now":
+                    todo = "<span style='color:" + MUTED + ";'>In range now: check the Swing Screener</span>"
+                    away = "<span style='color:" + MUTED + ";'>&mdash;</span>"
+                elif s_["state"] in ("extended", "coiling"):
+                    todo = (("Dip to " if is_long else "Bounce to ") + "<strong>" + trig + "</strong> (21MA), then close back "
+                            + ("above" if is_long else "below"))
+                    away = "{:+.1f}%".format(s_["away"])
+                elif s_["state"] == "below":
+                    todo = "Close back " + ("above " if is_long else "below ") + "<strong>" + trig + "</strong> (21MA)"
+                    away = "{:+.1f}%".format(s_["away"])
+                elif s_["state"] == "notstacked":
+                    todo = ("The 21MA (<strong>{:,.2f}</strong>) has to cross " + ("above" if is_long else "below")
+                            + " the 50MA (<strong>{:,.2f}</strong>)").format(s_["m21"], s_["m50"])
+                    away = "<span style='color:" + MUTED + ";'>&mdash;</span>"
                 else:
-                    verdict, vcol = "Reversed", RED
-                rows += ("<tr><td style='font-weight:700;'>" + t + "</td>"
-                         "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(last) + "</td>"
-                         "<td style='text-align:right;font-weight:600;color:" + (GREEN if now >= 0 else RED) + ";'>"
-                         + "{:+.1f}%".format(now) + "</td>"
-                         "<td style='text-align:right;color:" + vcol + ";font-weight:600;'>" + verdict + "</td></tr>")
+                    todo = ("Reclaim " if is_long else "Lose ") + "<strong>" + trig + "</strong> first"
+                    away = "{:+.1f}%".format(s_["away"])
+                if s_["t1"] is not None:
+                    room = ("{:+.1f}%".format(s_["room"]) if is_long else "{:-.1f}%".format(-s_["room"])) \
+                        + " <span style='color:" + MUTED + ";'>to " + "{:,.2f}".format(s_["t1"]) + "</span>"
+                else:
+                    room = "<span style='color:" + MUTED + ";'>" + ("Blue sky" if is_long else "No pivot below") + "</span>"
+                body += ("<tr><td style='font-weight:700;'>" + tkr + "<div style='color:" + MUTED
+                         + ";font-size:11px;font-weight:400;'>" + "{:+.1f}%".format(wkpct) + " last wk</div></td>"
+                         "<td>" + chip + "<div style='color:" + MUTED + ";font-size:11px;margin-top:2px;'>"
+                         + "{:+.1f}%".format(s_["ext"]) + " vs 21MA</div></td>"
+                         "<td>" + todo + "</td>"
+                         "<td style='text-align:right;'>" + away + "</td>"
+                         "<td style='text-align:right;'>" + room + "</td></tr>")
             return ("<div style='font-size:11.5px;text-transform:uppercase;letter-spacing:0.8px;color:" + MUTED
-                    + ";font-weight:600;margin:0 0 8px 2px;'>" + title + "</div>"
-                    "<table class='ns-tbl'><tr><th style='text-align:left;'>Ticker</th>"
-                    "<th style='text-align:right;'>Last wk</th><th style='text-align:right;'>This wk</th>"
-                    "<th style='text-align:right;'>Result</th></tr>" + rows + "</table>")
+                    + ";font-weight:600;margin:14px 0 8px 2px;'>" + title + "</div>"
+                    "<table class='wl'><tr><th>Ticker</th><th>Where it stands</th><th>Becomes a candidate at</th>"
+                    "<th style='text-align:right;'>From here</th><th style='text-align:right;'>Room to T1</th></tr>"
+                    + body + "</table>")
 
-        fc1, fc2 = st.columns(2)
-        with fc1:
-            st.markdown(follow_table("Last week's leaders", prior_lead, True), unsafe_allow_html=True)
-        with fc2:
-            st.markdown(follow_table("Last week's laggards", prior_lag, False), unsafe_allow_html=True)
+        st.markdown("<style>.wl{width:100%;border-collapse:collapse;background:#151b26;border:1px solid #232c3d;"
+                    "font-size:13.5px;}.wl th{font-size:11.5px;text-transform:uppercase;letter-spacing:0.8px;color:#a8b6c6;"
+                    "padding:10px 12px;border-bottom:1px solid #232c3d;font-weight:600;text-align:left;}"
+                    ".wl td{padding:9px 12px;border-bottom:1px solid #1c2434;color:#e6edf3;vertical-align:top;}</style>",
+                    unsafe_allow_html=True)
+        st.markdown(_wl_table("Longs to watch (the leaders above)", _wl_rows(leaders, True), True)
+                    + _wl_table("Shorts to watch (the laggards above)", _wl_rows(laggards, False), False),
+                    unsafe_allow_html=True)
 
-        # The one number that answers "is chasing strength working right now?"
-        if prior_lead:
-            avg_lead = sum(mv[t] for t in prior_lead) / len(prior_lead)
-            kept = sum(1 for t in prior_lead if mv[t] > 0)
-            edge = avg_lead - wk_pct
-            st.markdown("<div class='ns-panel' style='margin-top:10px;border-left:3px solid "
-                        + (GREEN if edge >= 0 else RED) + ";'>"
-                        "<span style='font-size:13.5px;color:#cdd8e4;'><strong>Buying last week's six leaders "
-                        "returned " + "{:+.1f}%".format(avg_lead) + " on average this week</strong> against "
-                        + "{:+.1f}%".format(wk_pct) + " for the index, so chasing strength was worth "
-                        + "{:+.1f}%".format(edge) + " this week. " + str(kept) + " of " + str(len(prior_lead))
-                        + " kept going. One week is not a pattern; the value is in watching this number "
-                        "week after week.</span></div>", unsafe_allow_html=True)
+    # ---------- 7. Does strength carry? ----------
+    ROLL_WEEKS = 12
+    st.markdown("<div class='ns-section' style='margin-top:22px;'>🔁 Does Strength Carry?</div>", unsafe_allow_html=True)
+    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                "Each of the last " + str(ROLL_WEEKS) + " weeks, the six biggest gainers and losers on the watchlist were "
+                "ranked, then followed through the <em>next</em> week and compared with SPX. One week proves nothing; "
+                "a dozen at once is a lean. It answers a practical question: right now, does it pay to buy strength, "
+                "or to wait for the pullback?</p>", unsafe_allow_html=True)
+    rf = None
+    try:
+        _spx = get_spx_daily(_wstart)
+        if wo and _spx is not None:
+            rf = rolling_followthrough({t_: _settled(d_) for t_, d_ in wo.items()}, _settled(_spx),
+                                       n_pairs=ROLL_WEEKS, top=6, today=now_et)
+    except Exception:
+        rf = None
+
+    if rf is None or rf["n"] < 3:
+        st.info("Not enough weekly history to test this yet.")
+    else:
+        lead_pct = rf["lead_beat"] / rf["names"] * 100.0
+        lag_pct = rf["lag_trail"] / rf["names"] * 100.0
+        tl = tile("Leaders vs SPX", "{:+.1f} pts".format(rf["ex_lead"]), "next-week average, %d weeks" % rf["n"],
+                  GREEN if rf["ex_lead"] >= 0 else RED)
+        tl += tile("Leaders that beat SPX", "%d of %d" % (rf["lead_beat"], rf["names"]), "%.0f%% the following week" % lead_pct,
+                   GREEN if lead_pct >= 50 else RED)
+        tl += tile("Laggards vs SPX", "{:+.1f} pts".format(rf["ex_lag"]), "negative means weakness continued",
+                   RED if rf["ex_lag"] >= 0 else GREEN)
+        tl += tile("Laggards that trailed SPX", "%d of %d" % (rf["lag_trail"], rf["names"]), "%.0f%% the following week" % lag_pct,
+                   GREEN if lag_pct >= 50 else RED)
+        st.markdown("<div class='ns-row'>" + tl + "</div>", unsafe_allow_html=True)
+
+        if rf["ex_lead"] <= -0.3 and lead_pct < 50:
+            v_head, v_tail = ("Strength has not carried",
+                              " last week's leaders trailed SPX the following week, so buying last week's strength has not paid. "
+                              "That favors waiting for the pullback over chasing the breakout.")
+        elif rf["ex_lead"] >= 0.3 and lead_pct > 50:
+            v_head, v_tail = ("Strength has carried",
+                              " last week's leaders kept beating SPX the following week, so buying last week's strength has paid. "
+                              "That favors buying breakouts over waiting for the pullback.")
+        else:
+            v_head, v_tail = ("No clear edge from strength",
+                              " last week's leaders have been close to a coin flip against SPX over this window.")
+        if rf["ex_lag"] <= -0.3 and lag_pct > 50:
+            v2 = " Weakness has continued: last week's laggards kept trailing."
+        elif rf["ex_lag"] >= 0.3 and lag_pct < 50:
+            v2 = " Weakness has not continued: last week's laggards have tended to bounce."
+        else:
+            v2 = " Laggards have shown no clear pattern."
+        st.markdown("<div class='ns-panel' style='border-left:3px solid " + BLUE + ";'><span style='font-size:13.5px;color:#cdd8e4;'>"
+                    "<strong>" + v_head + ":</strong>" + v_tail + v2 + " "
+                    + str(rf["n"]) + " weeks of six names is a small sample: read it as a lean for how to approach the screener "
+                    "this month, not a rule.</span></div>", unsafe_allow_html=True)
+
+        rows_h = ""
+        for r in reversed(rf["rows"]):
+            rows_h += ("<tr><td>" + (r["w0"] - pd.Timedelta(days=4)).strftime("%b %d") + " to " + r["w0"].strftime("%b %d")
+                       + "</td><td style='color:" + MUTED + ";'>" + (r["w1"] - pd.Timedelta(days=4)).strftime("%b %d")
+                       + " to " + r["w1"].strftime("%b %d") + "</td>"
+                       "<td style='text-align:right;color:" + (GREEN if r["lead_next"] >= 0 else RED) + ";'>"
+                       + "{:+.1f}%".format(r["lead_next"]) + "</td>"
+                       "<td style='text-align:right;color:" + (GREEN if r["lag_next"] >= 0 else RED) + ";'>"
+                       + "{:+.1f}%".format(r["lag_next"]) + "</td>"
+                       "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(r["idx_next"]) + "</td>"
+                       "<td style='text-align:right;'>" + str(r["lead_beat"]) + " of " + str(r["top"]) + "</td>"
+                       "<td style='text-align:right;'>" + str(r["lag_trail"]) + " of " + str(r["top"]) + "</td></tr>")
+        st.markdown("<table class='wl'><tr><th>Ranked week</th><th>Followed week</th>"
+                    "<th style='text-align:right;'>Leaders</th><th style='text-align:right;'>Laggards</th>"
+                    "<th style='text-align:right;'>SPX</th><th style='text-align:right;'>Leaders beat SPX</th>"
+                    "<th style='text-align:right;'>Laggards trailed SPX</th></tr>" + rows_h + "</table>",
+                    unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
                 "This is not trading advice. This is purely for information/education.</p>", unsafe_allow_html=True)
