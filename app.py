@@ -805,13 +805,29 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
     return trades
 
 def shadow_summary(trades):
-    """Headline numbers over every entered trade. Win rate and averages use closed trades only."""
+    """Headline numbers over every entered trade.
+
+    `wins`, `win_rate`, `avg_r` and the like use closed trades only, which skew negative while a book is
+    young: stops resolve in days, winners take weeks. The `_all` figures count open trades at their last
+    close, and `long` / `short` break the same numbers out by side.
+    """
     ent = [x for x in trades if x["status"] in ("Open", "Closed")]
     closed = [x for x in ent if x["status"] == "Closed"]
     n_c = len(closed)
     rs = [x["r_mult"] for x in closed if x.get("r_mult") is not None]
     vs = [x["result"] - x["spx"] for x in closed if x.get("spx") is not None]
+    all_r = [x["r_mult"] for x in ent if x.get("r_mult") is not None]
+    sides = {}
+    for side in ("Long", "Short"):
+        sub = [x for x in ent if x["side"] == side]
+        sr = [x["r_mult"] for x in sub if x.get("r_mult") is not None]
+        sides[side.lower()] = dict(n=len(sub), closed=sum(1 for x in sub if x["status"] == "Closed"),
+                                   open=sum(1 for x in sub if x["status"] == "Open"),
+                                   avg_r=(sum(sr) / len(sr) if sr else None), total_r=sum(sr))
     return dict(signals=len(trades), entered=len(ent), closed=n_c, open=len(ent) - n_c,
+                total_r_all=sum(all_r), avg_r_all=(sum(all_r) / len(all_r) if all_r else None),
+                open_profit=sum(1 for x in ent if x["status"] == "Open" and x["result"] > 0),
+                long=sides["long"], short=sides["short"],
                 skipped=sum(1 for x in trades if x["status"] == "Skipped"),
                 pending=sum(1 for x in trades if x["status"] == "Pending"),
                 wins=sum(1 for x in closed if x["result"] > 0),
@@ -2003,17 +2019,31 @@ elif page_selection == "Swing Book":
 
             def _sg(v, d=1):
                 return ("{:+." + str(d) + "f}").format(v)
-            tl = tile("Entered", str(S["entered"]), "%d closed, %d open" % (S["closed"], S["open"]))
-            tl += tile("Win rate", ("%.0f%%" % S["win_rate"]) if S["win_rate"] is not None else "n/a",
-                       ("%d of %d closed" % (S["wins"], S["closed"])) if S["closed"] else "none closed yet",
-                       (GREEN if S["win_rate"] >= 50 else AMBER) if S["win_rate"] is not None else MUTED)
-            tl += tile("Average R", (_sg(S["avg_r"], 2) + "R") if S["avg_r"] is not None else "n/a", "per closed trade",
-                       (GREEN if S["avg_r"] > 0 else RED) if S["avg_r"] is not None else MUTED)
-            tl += tile("Reached T1", "%d of %d" % (S["reached_t1"], S["entered"]) if S["entered"] else "n/a", "of trades entered")
-            tl += tile("Vs owning SPX", (_sg(S["avg_vs_spx"]) + " pts") if S["avg_vs_spx"] is not None else "n/a",
-                       "avg per closed trade", (GREEN if S["avg_vs_spx"] > 0 else RED) if S["avg_vs_spx"] is not None else MUTED)
-            tl += tile("You took", "%d of %d" % (took, S["entered"]) if S["entered"] else "n/a", "also opened in your book")
+            def _r(v, d=2):
+                return "n/a" if v is None else (_sg(v, d) + "R")
+
+            def _col(v):
+                return MUTED if v is None else (GREEN if v > 0 else RED)
+            n_ent = S["entered"]
+            tl = tile("Entered", str(n_ent), "%d closed, %d open" % (S["closed"], S["open"]))
+            tl += tile("Average R, all trades", _r(S["avg_r_all"]), "open trades marked to the last close", _col(S["avg_r_all"]))
+            tl += tile("Net R, all trades", _r(S["total_r_all"], 1) if n_ent else "n/a", "sum over every entered trade",
+                       _col(S["total_r_all"]) if n_ent else MUTED)
+            tl += tile("Open, in profit", ("%d of %d" % (S["open_profit"], S["open"])) if S["open"] else "n/a",
+                       "marked to the last close", (GREEN if S["open_profit"] * 2 >= S["open"] else AMBER) if S["open"] else MUTED)
+            tl += tile("Reached T1", "%d of %d" % (S["reached_t1"], n_ent) if n_ent else "n/a", "of trades entered")
+            tl += tile("You took", "%d of %d" % (took, n_ent) if n_ent else "n/a", "also opened in your book")
             st.markdown("<div class='ns-row'>" + tl + "</div>", unsafe_allow_html=True)
+            lg, sh = S["long"], S["short"]
+            tl2 = tile("Longs", _r(lg["avg_r"]), ("%d trades: %d closed, %d open" % (lg["n"], lg["closed"], lg["open"])) if lg["n"] else "no trades",
+                       _col(lg["avg_r"]))
+            tl2 += tile("Shorts", _r(sh["avg_r"]), ("%d trades: %d closed, %d open" % (sh["n"], sh["closed"], sh["open"])) if sh["n"] else "no trades",
+                        _col(sh["avg_r"]))
+            tl2 += tile("Closed only", ("%d of %d won" % (S["wins"], S["closed"])) if S["closed"] else "none yet",
+                        ("avg %s, skews negative early" % _r(S["avg_r"])) if S["closed"] else "no trade has closed yet", MUTED)
+            tl2 += tile("Vs owning SPX", (_sg(S["avg_vs_spx"]) + " pts") if S["avg_vs_spx"] is not None else "n/a",
+                        "avg per closed trade", _col(S["avg_vs_spx"]))
+            st.markdown("<div class='ns-row' style='margin-top:8px;'>" + tl2 + "</div>", unsafe_allow_html=True)
 
             notes = []
             sk = [x_ for x_ in sh_trades if x_["status"] == "Skipped"]
@@ -2075,6 +2105,8 @@ elif page_selection == "Swing Book":
                           "a stop. It is recomputed from price history each time rather than stored, so a borderline signal "
                           "can shift slightly when a dividend adjusts old prices, and with this method the record reaches back "
                           "about six months. R is the result divided by the risk from the actual fill to the stop. "
+                          "Closed-only figures skew negative while a book is young, because stops resolve in days and winners "
+                          "take weeks; the all-trades figures count open trades at their last close. "
                           "<strong>YOURS</strong> marks a name your book opened within a week of the signal. "
                           "Vs owning SPX is the trade's result minus the index over the same days.</p>", unsafe_allow_html=True)
 
