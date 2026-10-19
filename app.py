@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 import yfinance as yf
 import plotly.graph_objects as go
 import math
@@ -375,6 +377,462 @@ def level_name(is_sup, bottom, top, label=""):
     return txt
 
 # ==========================================
+# SHARED SCREENER RULES
+# ==========================================
+UNIVERSE_SECTORS = {
+    # semis
+    "NVDA":"Semiconductors","AVGO":"Semiconductors","AMD":"Semiconductors","QCOM":"Semiconductors",
+    "TXN":"Semiconductors","AMAT":"Semiconductors","MU":"Semiconductors","LRCX":"Semiconductors",
+    "KLAC":"Semiconductors","ADI":"Semiconductors","MRVL":"Semiconductors","NXPI":"Semiconductors",
+    "ON":"Semiconductors","MCHP":"Semiconductors","INTC":"Semiconductors","SWKS":"Semiconductors",
+    "QRVO":"Semiconductors","TER":"Semiconductors","SMCI":"Semiconductors",
+    # software
+    "MSFT":"Software","ADBE":"Software","CRM":"Software","ORCL":"Software","NOW":"Software",
+    "PANW":"Software","CRWD":"Software","ZS":"Software","DDOG":"Software","NET":"Software",
+    "MDB":"Software","TEAM":"Software","WDAY":"Software","INTU":"Software","ADSK":"Software",
+    "ANSS":"Software","SNPS":"Software","CDNS":"Software","SNOW":"Software","PLTR":"Software",
+    # hardware / IT services
+    "AAPL":"Tech Hardware","CSCO":"Tech Hardware","IBM":"Tech Hardware","ACN":"Tech Hardware",
+    "INFY":"Tech Hardware","HPQ":"Tech Hardware","DELL":"Tech Hardware","WDC":"Tech Hardware",
+    "STX":"Tech Hardware","APH":"Tech Hardware","GLW":"Tech Hardware","KEYS":"Tech Hardware",
+    # internet / media
+    "GOOGL":"Internet & Media","META":"Internet & Media","NFLX":"Internet & Media","DIS":"Internet & Media",
+    "CMCSA":"Internet & Media","CHTR":"Internet & Media","WBD":"Internet & Media","PARA":"Internet & Media",
+    "EA":"Internet & Media","TTWO":"Internet & Media","RBLX":"Internet & Media","SPOT":"Internet & Media",
+    "UBER":"Internet & Media","LYFT":"Internet & Media","DASH":"Internet & Media","ABNB":"Internet & Media",
+    "BKNG":"Internet & Media",
+    "T":"Telecom","VZ":"Telecom","TMUS":"Telecom",
+    # financials
+    "JPM":"Banks","BAC":"Banks","WFC":"Banks","C":"Banks","USB":"Banks","PNC":"Banks","TFC":"Banks",
+    "COF":"Banks","DFS":"Banks","SYF":"Banks",
+    "GS":"Capital Markets","MS":"Capital Markets","SCHW":"Capital Markets","BLK":"Capital Markets",
+    "BX":"Capital Markets","KKR":"Capital Markets","APO":"Capital Markets","TROW":"Capital Markets",
+    "BEN":"Capital Markets","AMP":"Capital Markets","ICE":"Capital Markets","CME":"Capital Markets",
+    "NDAQ":"Capital Markets","MSCI":"Capital Markets","SPGI":"Capital Markets","MCO":"Capital Markets",
+    "V":"Payments","MA":"Payments","AXP":"Payments","PYPL":"Payments","FI":"Payments",
+    # healthcare
+    "JNJ":"Pharma","LLY":"Pharma","PFE":"Pharma","MRK":"Pharma","ABBV":"Pharma","BMY":"Pharma","ZTS":"Pharma",
+    "AMGN":"Biotech","GILD":"Biotech","BIIB":"Biotech","VRTX":"Biotech","REGN":"Biotech","MRNA":"Biotech",
+    "TMO":"Medical Devices","DHR":"Medical Devices","ABT":"Medical Devices","SYK":"Medical Devices",
+    "BSX":"Medical Devices","MDT":"Medical Devices","EW":"Medical Devices","ISRG":"Medical Devices",
+    "BDX":"Medical Devices",
+    "UNH":"Healthcare Services","HCA":"Healthcare Services","CI":"Healthcare Services","CVS":"Healthcare Services",
+    "ELV":"Healthcare Services","MCK":"Healthcare Services","COR":"Healthcare Services",
+    # energy, split so refiners cannot stack
+    "VLO":"Refiners","MPC":"Refiners","PSX":"Refiners","DINO":"Refiners",
+    "XOM":"Oil & Gas","CVX":"Oil & Gas","COP":"Oil & Gas","EOG":"Oil & Gas","OXY":"Oil & Gas",
+    "DVN":"Oil & Gas","FANG":"Oil & Gas","HES":"Oil & Gas","APA":"Oil & Gas","MRO":"Oil & Gas",
+    "CTRA":"Oil & Gas","EQT":"Oil & Gas",
+    "SLB":"Oil Services","HAL":"Oil Services","BKR":"Oil Services",
+    "KMI":"Midstream","WMB":"Midstream","OKE":"Midstream","TRGP":"Midstream","LNG":"Midstream",
+    # industrials
+    "CAT":"Industrials","DE":"Industrials","HON":"Industrials","MMM":"Industrials","EMR":"Industrials",
+    "ETN":"Industrials","PH":"Industrials","ITW":"Industrials","CMI":"Industrials","PCAR":"Industrials",
+    "URI":"Industrials","FAST":"Industrials","GWW":"Industrials","ROK":"Industrials","DOV":"Industrials",
+    "GE":"Industrials",
+    "BA":"Aerospace & Defense","LMT":"Aerospace & Defense","RTX":"Aerospace & Defense",
+    "NOC":"Aerospace & Defense","GD":"Aerospace & Defense",
+    "UNP":"Transports","CSX":"Transports","NSC":"Transports","UPS":"Transports","FDX":"Transports",
+    "DAL":"Transports","UAL":"Transports","LUV":"Transports",
+    "WM":"Waste","RSG":"Waste",
+    # consumer
+    "WMT":"Retail","COST":"Retail","TGT":"Retail","HD":"Retail","LOW":"Retail","DG":"Retail",
+    "DLTR":"Retail","KR":"Retail","TJX":"Retail","ROST":"Retail","ORLY":"Retail","AZO":"Retail",
+    "NKE":"Retail","LULU":"Retail",
+    "PG":"Staples","KO":"Staples","PEP":"Staples","PM":"Staples","MO":"Staples","MDLZ":"Staples",
+    "KHC":"Staples","GIS":"Staples","K":"Staples","HSY":"Staples","STZ":"Staples","KDP":"Staples",
+    "MNST":"Staples","CL":"Staples","KMB":"Staples","EL":"Staples","CHD":"Staples","CLX":"Staples",
+    "SYY":"Staples",
+    "MCD":"Restaurants & Travel","SBUX":"Restaurants & Travel","CMG":"Restaurants & Travel",
+    "YUM":"Restaurants & Travel","DRI":"Restaurants & Travel","MAR":"Restaurants & Travel",
+    "HLT":"Restaurants & Travel","LVS":"Restaurants & Travel","MGM":"Restaurants & Travel",
+    "RCL":"Restaurants & Travel","CCL":"Restaurants & Travel","NCLH":"Restaurants & Travel",
+    "GM":"Autos & Housing","F":"Autos & Housing","APTV":"Autos & Housing","LEN":"Autos & Housing",
+    "DHI":"Autos & Housing","PHM":"Autos & Housing","NVR":"Autos & Housing",
+    "AMZN":"Consumer Discretionary","TSLA":"Consumer Discretionary",
+    # materials, utilities, real estate
+    "LIN":"Materials","APD":"Materials","SHW":"Materials","ECL":"Materials","FCX":"Materials",
+    "NEM":"Materials","NUE":"Materials","STLD":"Materials","VMC":"Materials","MLM":"Materials",
+    "DOW":"Chemicals","DD":"Chemicals","PPG":"Chemicals","ALB":"Chemicals","CF":"Chemicals","MOS":"Chemicals",
+    "NEE":"Utilities","DUK":"Utilities","SO":"Utilities","D":"Utilities","AEP":"Utilities","EXC":"Utilities",
+    "SRE":"Utilities","XEL":"Utilities","ED":"Utilities","PEG":"Utilities","WEC":"Utilities","ES":"Utilities",
+    "PCG":"Utilities","VST":"Utilities","CEG":"Utilities",
+    "AMT":"REITs","PLD":"REITs","CCI":"REITs","EQIX":"REITs","PSA":"REITs","SPG":"REITs","O":"REITs",
+    "WELL":"REITs","DLR":"REITs","VICI":"REITs","AVB":"REITs","EQR":"REITs",
+}
+UNIVERSE = sorted(UNIVERSE_SECTORS.keys())
+
+SCREEN_DEFAULTS = dict(min_dv=20.0, max_ext=6.0, pullback_win=5, req_rs=True,
+                       min_stop_atr=0.75, min_rr=2.0, max_atr=15.0, pos_cap=15.0)
+
+@st.cache_data(ttl=3600, show_spinner="Scanning the universe...")
+def get_universe_ohlc(tickers, end_str):
+    start = (pd.Timestamp(end_str) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
+    out = {}
+    tl = list(tickers)
+    for i in range(0, len(tl), 120):
+        chunk = tl[i:i + 120]
+        try:
+            data = _fetch_with_retry(lambda c=chunk: yf.download(
+                tickers=" ".join(c), start=start, end=end_str, interval="1d",
+                group_by="ticker", auto_adjust=True, progress=False, threads=False))
+        except Exception:
+            continue
+        if data is None or len(data) == 0:
+            continue
+        for t in chunk:
+            try:
+                df = data[t] if isinstance(data.columns, pd.MultiIndex) else data
+                df = df.dropna(subset=["Close"])
+                if len(df) > 120:
+                    out[t] = df
+            except Exception:
+                continue
+    return out
+
+
+def pick_targets(cands, atr, gap=1.0, n=3, last=None):
+    """Take targets nearest-first, skipping any closer than `gap` ATRs to the last one kept.
+
+    Two pivots a few cents apart are one level, not two. Counting them twice makes the
+    scale-out plan sell most of the position at essentially the same price. `last` lets a
+    second call carry on from targets already chosen.
+    """
+    out = []
+    for x in cands:
+        ref = out[-1] if out else last
+        if ref is None or abs(x - ref) >= atr * gap:
+            out.append(x)
+        if len(out) == n:
+            break
+    return out
+
+
+def screen_setup(t, df, want_long, P, spx_3m):
+    """The swing screener's rules for one name as of the last bar of `df`.
+
+    `P` holds the rule settings and `spx_3m` the index's three-month return at that date, so the live
+    screener and any replay of it run exactly the same code. Returns a setup dict or None.
+    """
+    c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
+    px = float(c.iloc[-1])
+    e21 = c.ewm(span=21, adjust=False).mean()
+    s50 = c.rolling(50).mean()
+    if pd.isna(s50.iloc[-1]):
+        return None
+    # Average true range: one ATR is roughly one session of movement, so the
+    # distance to a target in ATRs is an estimate of how long it would take.
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    atr = float(tr.tail(14).mean())
+    if not atr or pd.isna(atr) or atr <= 0:
+        return None
+    m21, m50 = float(e21.iloc[-1]), float(s50.iloc[-1])
+    ext = (px / m21 - 1.0) * 100.0
+    dv = float((c * v).tail(20).mean()) / 1e6
+    if dv < P["min_dv"]:
+        return None
+    rs = (px / float(c.iloc[-64]) - 1.0) * 100.0 if len(c) > 64 else None
+
+    if want_long:
+        if not (px > m21 > m50 and px > m50):
+            return None
+        if ext > P["max_ext"]:
+            return None
+        if not bool((df["Low"].iloc[-int(P["pullback_win"]):] < e21.iloc[-int(P["pullback_win"]):]).any()):
+            return None
+        if P["req_rs"] and (rs is None or spx_3m is None or rs <= spx_3m):
+            return None
+        stop = float(l.tail(10).min()) * 0.995
+        if stop >= px:
+            return None
+        risk = px - stop
+        if risk < atr * P["min_stop_atr"]:
+            return None
+        cand = sorted(set(round(float(x), 2) for x in swing_pivots(h.tail(160), 5, True).values if x > px * 1.005))
+        tg = pick_targets(cand, atr)
+        if len(tg) < 3:
+            lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
+            rng = max(hi60 - lo60, px * 0.02)
+            fibs = sorted(set(round(lo60 + rng * m, 2) for m in (1.272, 1.618, 2.0) if lo60 + rng * m > px * 1.005))
+            if tg:
+                fibs = [x for x in fibs if x > tg[-1]]      # only past the last real level
+            tg = tg + pick_targets(fibs, atr, n=3 - len(tg), last=tg[-1] if tg else None)
+        if not tg:
+            return None
+        rr = (tg[0] - px) / risk
+    else:
+        if not (px < m21 < m50 and px < m50):
+            return None
+        if abs(ext) > P["max_ext"]:
+            return None
+        if not bool((df["High"].iloc[-int(P["pullback_win"]):] > e21.iloc[-int(P["pullback_win"]):]).any()):
+            return None
+        if P["req_rs"] and (rs is None or spx_3m is None or rs >= spx_3m):
+            return None
+        stop = float(h.tail(10).max()) * 1.005
+        if stop <= px:
+            return None
+        risk = stop - px
+        if risk < atr * P["min_stop_atr"]:
+            return None
+        cand = sorted(set(round(float(x), 2) for x in swing_pivots(l.tail(160), 5, False).values if x < px * 0.995),
+                      reverse=True)
+        tg = pick_targets(cand, atr)
+        if len(tg) < 3:
+            lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
+            rng = max(hi60 - lo60, px * 0.02)
+            fibs = sorted(set(round(hi60 - rng * m, 2) for m in (1.272, 1.618, 2.0) if 0 < hi60 - rng * m < px * 0.995),
+                          reverse=True)
+            if tg:
+                fibs = [x for x in fibs if x < tg[-1]]      # only past the last real level
+            tg = tg + pick_targets(fibs, atr, n=3 - len(tg), last=tg[-1] if tg else None)
+        if not tg:
+            return None
+        rr = (px - tg[0]) / risk
+
+    if rr < P["min_rr"]:
+        return None
+    atr_t1 = abs(tg[0] - px) / atr
+    if atr_t1 > P["max_atr"]:
+        return None
+    # Entries here are the last close, but the order goes in at the next open. This is the range of
+    # opens at which the setup still clears the two rules that depend on the entry price, with the
+    # stop and T1 left where they are: reward at least P["min_rr"] times the risk, and a stop at least
+    # P["min_stop_atr"] ATRs away. Outside it the trade is no longer the one that was screened.
+    if want_long:
+        open_hi = (tg[0] + P["min_rr"] * stop) / (1.0 + P["min_rr"])
+        open_lo = stop + atr * P["min_stop_atr"]
+    else:
+        open_lo = (P["min_rr"] * stop + tg[0]) / (1.0 + P["min_rr"])
+        open_hi = stop - atr * P["min_stop_atr"]
+    # Flat sizing: every candidate gets the same share of the book, so the risk on each
+    # trade is whatever its stop distance makes it. The Risk column shows that figure.
+    return dict(t=t, sec=UNIVERSE_SECTORS.get(t, "Other"), px=px, stop=stop, tg=tg, rr=rr,
+                ext=ext, rs=rs, atr=atr, atr_t1=atr_t1, stop_atr=risk / atr,
+                open_lo=open_lo, open_hi=open_hi,
+                raw=float(P["pos_cap"]), size=float(P["pos_cap"]), capped=False)
+
+
+
+# ==========================================
+# SCREENER SHADOW BOOK
+# ==========================================
+SHADOW_START = pd.Timestamp("2026-09-25")   # the first screener run: signals from this close onward are tracked
+SHADOW_PLAN = (0.50, 0.25)                  # share sold at T1 and at T2; the rest goes at the stop or the last target
+
+def walk_trade(o, h, l, c, k, is_long, entry, stop, tg, plan=SHADOW_PLAN):
+    """Manage one trade bar by bar from its entry bar `k`, exactly as the swing rules say.
+
+    The entry fills at the open of bar k, so that whole bar is after the fill. A bar that touches both
+    the stop and a target counts as a stop, a level price gapped through fills at the open, the stop
+    moves to breakeven once T1 prints, and shares come off at T1 and T2 per `plan` with the remainder
+    going at the stop or at the last target. Returns the legs sold and whether the trade is finished.
+    """
+    n_t = len(tg)
+    stop_now, hits, sold, legs = stop, 0, 0.0, []
+    for j in range(k, len(c)):
+        oj, hj, lj = float(o[j]), float(h[j]), float(l[j])
+        if (lj <= stop_now) if is_long else (hj >= stop_now):
+            gapped = j > k and ((oj < stop_now) if is_long else (oj > stop_now))
+            legs.append((1.0 - sold, oj if gapped else stop_now))
+            return dict(done=True, exit_idx=j, legs=legs, hits=hits, sold=1.0, last=float(c[j]),
+                        how=("Stopped out" if hits == 0 else "Breakeven after T%d" % hits))
+        while hits < n_t and ((hj >= tg[hits]) if is_long else (lj <= tg[hits])):
+            lvl = tg[hits]
+            gapped = j > k and ((oj > lvl) if is_long else (oj < lvl))
+            fill = oj if gapped else lvl
+            hits += 1
+            if hits == n_t:
+                legs.append((1.0 - sold, fill))
+                return dict(done=True, exit_idx=j, legs=legs, hits=hits, sold=1.0, last=float(c[j]),
+                            how="All targets hit")
+            share = plan[hits - 1] if hits - 1 < len(plan) else 0.0
+            legs.append((share, fill))
+            sold += share
+            if hits == 1:
+                stop_now = entry
+    return dict(done=False, exit_idx=None, legs=legs, hits=hits, sold=sold, last=float(c[-1]),
+                how=("Open" if hits == 0 else "Open, T%d hit" % hits))
+
+def trade_result(entry, is_long, legs, last=None, remaining=0.0):
+    """One return from every leg sold, with any unsold remainder marked to `last`."""
+    ret = (lambda px: (px - entry) / entry * 100.0) if is_long else (lambda px: (entry - px) / entry * 100.0)
+    tot = sum(share * ret(px) for share, px in legs)
+    if remaining > 0 and last is not None:
+        tot += remaining * ret(last)
+    return tot
+
+def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_hist=160, prefilter=True):
+    """Replay the swing screener over history and manage every setup it would have raised.
+
+    For each close from `start_date`, the shared rules are run on exactly the data that existed then
+    (including that day's three-month SPX return). A setup is entered at the NEXT open, but only if
+    that open is still inside the setup's valid range; otherwise it is recorded as skipped. A name
+    already in a trade is not entered again. Nothing is stored: it is recomputed from price history.
+
+    data: {ticker: settled daily OHLCV}, spx: frame with Open and Close.
+    `min_hist` is the pivot lookback the live screener always has, so a replayed day sees what the screener saw.
+    `prefilter` runs the shared rules only on days where cheap necessary conditions hold (trend, extension,
+    pullback window, volume, relative strength, stop distance, a pivot target far enough away); turning it off runs them everywhere and exists
+    to prove it changes nothing.
+    """
+    start = pd.Timestamp(start_date).normalize()
+    sx = spx[["Open", "Close"]].dropna()
+    sidx = pd.DatetimeIndex(sx.index)
+    if sidx.tz is not None:
+        sidx = sidx.tz_localize(None)
+    sidx = sidx.normalize()
+    s_open, s_close = sx["Open"].values.astype(float), sx["Close"].values.astype(float)
+
+    def spx_3m_at(date):
+        j = int(sidx.searchsorted(date, side="right")) - 1
+        return None if j < 63 else (s_close[j] / s_close[j - 63] - 1.0) * 100.0
+
+    def spx_ret(d0, d1):
+        j0 = int(sidx.searchsorted(d0, side="left"))
+        j1 = int(sidx.searchsorted(d1, side="right")) - 1
+        if j0 >= len(sidx) or j1 < j0:
+            return None
+        return (s_close[j1] / s_open[j0] - 1.0) * 100.0
+
+    w, tol, trades = int(P["pullback_win"]), 1e-9, []
+    for t, df in data.items():
+        df = df[~df.index.duplicated(keep="last")]
+        ix = pd.DatetimeIndex(df.index)
+        if ix.tz is not None:
+            ix = ix.tz_localize(None)
+        ix = ix.normalize()
+        n = len(df)
+        if n < min_hist + 2:
+            continue
+        cs = df["Close"]
+        e21s, s50s = cs.ewm(span=21, adjust=False).mean(), cs.rolling(50).mean()
+        ev, sv, cv = e21s.values, s50s.values, cs.values.astype(float)
+        ov, hv, lv = df["Open"].values.astype(float), df["High"].values.astype(float), df["Low"].values.astype(float)
+        ar = np.arange(n)
+        live = (ar >= min_hist) & (ix >= start)
+        if prefilter:
+            dvs = ((cs * df["Volume"]).rolling(20).mean() / 1e6).values
+            ext = (cv / ev - 1.0) * 100.0
+            dip = (df["Low"] < e21s).astype(float).rolling(w).max().fillna(0).values > 0
+            poke = (df["High"] > e21s).astype(float).rolling(w).max().fillna(0).values > 0
+            # relative strength against the SPX of each day's own date
+            if P["req_rs"]:
+                jj = sidx.searchsorted(ix, side="right") - 1
+                okj = jj >= 63
+                sp = np.full(n, np.nan)
+                sp[okj] = (s_close[jj[okj]] / s_close[jj[okj] - 63] - 1.0) * 100.0
+                rsv = np.full(n, np.nan)
+                rsv[63:] = (cv[63:] / cv[:-63] - 1.0) * 100.0
+                rs_long = np.isfinite(sp) & np.isfinite(rsv) & (rsv > sp - 1e-9)
+                rs_short = np.isfinite(sp) & np.isfinite(rsv) & (rsv < sp + 1e-9)
+            else:
+                rs_long = rs_short = np.ones(n, bool)
+            # stop distance: the swing-low / swing-high stop must sit at least min_stop_atr ATRs from the close
+            pcv = np.r_[np.nan, cv[:-1]]
+            trv = np.nanmax(np.vstack([hv - lv, np.abs(hv - pcv), np.abs(lv - pcv)]), axis=0)
+            atrv = pd.Series(trv).rolling(14).mean().values
+            lo10 = pd.Series(lv).rolling(10).min().values * 0.995
+            hi10 = pd.Series(hv).rolling(10).max().values * 1.005
+            with np.errstate(invalid="ignore"):
+                st_long = np.isfinite(lo10) & (atrv > 0) & (lo10 < cv) & (cv - lo10 >= atrv * P["min_stop_atr"] - 1e-9 * cv)
+                st_short = np.isfinite(hi10) & (atrv > 0) & (hi10 > cv) & (hi10 - cv >= atrv * P["min_stop_atr"] - 1e-9 * cv)
+            base = np.isfinite(sv) & (dvs >= P["min_dv"] - 1e-9) & live
+            long_ok = (base & (cv > ev * (1 - tol)) & (ev > sv * (1 - tol)) & (cv > sv * (1 - tol))
+                       & (ext <= P["max_ext"] + 1e-9) & dip & rs_long & st_long)
+            short_ok = (base & (cv < ev * (1 + tol)) & (ev < sv * (1 + tol)) & (cv < sv * (1 + tol))
+                        & (np.abs(ext) <= P["max_ext"] + 1e-9) & poke & rs_short & st_short)
+            def t1_ok(i, is_long):
+                """Necessary condition only: if a pivot target exists, it must be far enough for the reward-to-risk
+                and the ATR distance. With no pivot beyond price the screener falls back to extensions, so pass."""
+                win = (hv if is_long else lv)[i - 159: i + 1]
+                if len(win) < 160:
+                    return True
+                cen = win[5:155]
+                roll = sliding_window_view(win, 11).max(axis=1) if is_long else sliding_window_view(win, 11).min(axis=1)
+                if is_long:
+                    piv = cen[(cen == roll) & (cen > cv[i] * 1.005)]
+                    if piv.size == 0:
+                        return True
+                    reward, risk = piv.min() - cv[i], cv[i] - lo10[i]
+                else:
+                    piv = cen[(cen == roll) & (cen < cv[i] * 0.995)]
+                    if piv.size == 0:
+                        return True
+                    reward, risk = cv[i] - piv.max(), hi10[i] - cv[i]
+                return reward >= P["min_rr"] * risk - 0.01 and reward / atrv[i] <= P["max_atr"] + 0.01 / atrv[i]
+        else:
+            long_ok = short_ok = live
+            t1_ok = lambda i, is_long: True
+        busy_in = busy_out = None
+        for i in np.where(long_ok | short_ok)[0]:
+            if busy_in is not None and busy_in <= i and (busy_out is None or busy_out > i):
+                continue                                   # still in the last trade on this name
+            res, is_long = None, None
+            for want_long, ok in ((True, long_ok), (False, short_ok)):
+                if ok[i] and t1_ok(i, want_long):
+                    res = screen_setup(t, df.iloc[: i + 1], want_long, P, spx_3m_at(ix[i]))
+                    if res is not None:
+                        is_long = want_long
+                        break
+            if res is None:
+                continue
+            rec = dict(t=t, sec=res["sec"], side="Long" if is_long else "Short", signal_date=ix[i].date(),
+                       signal_px=res["px"], stop=res["stop"], tg=list(res["tg"]), rr_signal=res["rr"],
+                       open_lo=res["open_lo"], open_hi=res["open_hi"], last=float(cv[-1]))
+            if i == n - 1:
+                trades.append(dict(rec, status="Pending"))
+                continue
+            k = i + 1
+            entry = float(ov[k])
+            if not (res["open_lo"] <= entry <= res["open_hi"]):
+                trades.append(dict(rec, status="Skipped", entry=entry, entry_date=ix[k].date()))
+                continue
+            wk = walk_trade(ov, hv, lv, cv, k, is_long, entry, res["stop"], res["tg"], plan)
+            risk_pct = abs(entry - res["stop"]) / entry * 100.0
+            result = trade_result(entry, is_long, wk["legs"], wk["last"], 0.0 if wk["done"] else 1.0 - wk["sold"])
+            end_idx = wk["exit_idx"] if wk["done"] else n - 1
+            tg0 = res["tg"][0]
+            rr_entry = ((tg0 - entry) / (entry - res["stop"])) if is_long else ((entry - tg0) / (res["stop"] - entry))
+            trades.append(dict(rec, status="Closed" if wk["done"] else "Open", entry=entry, entry_date=ix[k].date(),
+                               exit_date=(ix[wk["exit_idx"]].date() if wk["done"] else None), how=wk["how"],
+                               hits=wk["hits"], result=result, risk_pct=risk_pct,
+                               r_mult=(result / risk_pct if risk_pct else None), rr=rr_entry,
+                               spx=spx_ret(ix[k], ix[end_idx])))
+            busy_in, busy_out = k, (wk["exit_idx"] if wk["done"] else None)
+    trades.sort(key=lambda x: (x["signal_date"], x["t"]))
+    return trades
+
+def shadow_summary(trades):
+    """Headline numbers over every entered trade. Win rate and averages use closed trades only."""
+    ent = [x for x in trades if x["status"] in ("Open", "Closed")]
+    closed = [x for x in ent if x["status"] == "Closed"]
+    n_c = len(closed)
+    rs = [x["r_mult"] for x in closed if x.get("r_mult") is not None]
+    vs = [x["result"] - x["spx"] for x in closed if x.get("spx") is not None]
+    return dict(signals=len(trades), entered=len(ent), closed=n_c, open=len(ent) - n_c,
+                skipped=sum(1 for x in trades if x["status"] == "Skipped"),
+                pending=sum(1 for x in trades if x["status"] == "Pending"),
+                wins=sum(1 for x in closed if x["result"] > 0),
+                win_rate=(sum(1 for x in closed if x["result"] > 0) / n_c * 100.0 if n_c else None),
+                avg_result=(sum(x["result"] for x in closed) / n_c if n_c else None),
+                avg_r=(sum(rs) / len(rs) if rs else None),
+                reached_t1=sum(1 for x in ent if x["hits"] >= 1),
+                avg_vs_spx=(sum(vs) / len(vs) if vs else None))
+
+def book_match(rec, book, window_days=7):
+    """Did the real Swing Book open this ticker within a week after the screener raised it?"""
+    if book is None or "Date_Opened_dt" not in book.columns:
+        return False
+    d0 = pd.Timestamp(rec["signal_date"])
+    rows = book[book["Ticker"].astype(str).str.strip().str.upper() == rec["t"]]
+    for d in rows["Date_Opened_dt"].dropna():
+        if d0 <= pd.Timestamp(d).normalize() <= d0 + pd.Timedelta(days=window_days):
+            return True
+    return False
+
+# ==========================================
 # 2. SIDEBAR NAVIGATION ROUTER
 # ==========================================
 st.sidebar.title("🧭 Navigation")
@@ -546,7 +1004,7 @@ if page_selection == "Live Cockpit":
                 filtered_levels = filtered_levels[filtered_levels["_dt"] == levels_asof]
     except Exception:
         filtered_levels = pd.DataFrame()
-        levels_note = "Levels sheet unavailable — zones and ladder hidden."
+        levels_note = "Levels sheet unavailable: zones and ladder hidden."
     if levels_note:
         st.caption(levels_note)
     elif levels_asof is not None:
@@ -747,7 +1205,7 @@ if page_selection == "Live Cockpit":
     st.plotly_chart(fig, theme=None, use_container_width=True,
                     config={"scrollZoom": True, "displaylogo": False,
                             "modeBarButtonsToRemove": ["select2d", "lasso2d"]})
-    st.caption("Chart opens zoomed to the session. Scroll or drag to zoom out — every published level is plotted, including those outside the current view.")
+    st.caption("Chart opens zoomed to the session. Scroll or drag to zoom out. Every published level is plotted, including those outside the current view.")
 
     st.divider()
 
@@ -900,7 +1358,7 @@ elif page_selection == "Swing Book":
     def _avg_exit_txt(row):
         legs, _ = exit_legs(row)
         if not legs:
-            return "—"
+            return "-"
         tot = sum(w for w, _ in legs)
         avg = sum(p * w for w, p in legs) / tot if tot else legs[-1][1]
         return "{:,.2f}".format(avg)
@@ -908,7 +1366,7 @@ elif page_selection == "Swing Book":
     def _legs_txt(row):
         legs, _ = exit_legs(row)
         n = len([1 for w, _ in legs if w > 0])
-        return "—" if n <= 1 else str(n)
+        return "-" if n <= 1 else str(n)
 
     # ---- Closed trade results ----
     def closed_result(row):
@@ -987,7 +1445,7 @@ elif page_selection == "Swing Book":
             tile("Book Opened", BOOK_OPENED, "tracked from trade #1")
             + tile("Risk Per Trade", RISK_PER_TRADE, "of allocated capital")
             + tile("Max Open", str(MAX_OPEN_POSITIONS), "positions at a time")
-            + tile("Record", "0W — 0L", "every result logged, nothing hidden")
+            + tile("Record", "0W / 0L", "every result logged, nothing hidden")
         )
         if bench_since_inception is not None:
             tiles += tile("SPX Since Inception", "%+.1f%%" % bench_since_inception, "the benchmark to beat",
@@ -1001,10 +1459,10 @@ elif page_selection == "Swing Book":
         avg_l = losses["Result %"].mean() if not losses.empty else 0.0
         total = closed_df["Result %"].sum()
 
-        tiles = tile("Closed Trades", str(n), str(len(wins)) + "W — " + str(len(losses)) + "L")
-        # A win rate off a handful of trades is noise, not a track record — say so.
+        tiles = tile("Closed Trades", str(n), str(len(wins)) + "W / " + str(len(losses)) + "L")
+        # A win rate off a handful of trades is noise, not a track record, so say so.
         if n < 5:
-            tiles += tile("Win Rate", "%.0f%%" % win_rate, "only %d trade%s — not meaningful yet" % (n, "" if n == 1 else "s"), MUTED)
+            tiles += tile("Win Rate", "%.0f%%" % win_rate, "only %d trade%s, not meaningful yet" % (n, "" if n == 1 else "s"), MUTED)
         else:
             tiles += tile("Win Rate", "%.0f%%" % win_rate, "across %d closed trades" % n, GREEN if win_rate >= 50 else RED)
         tiles += tile("Avg Winner", "+%.1f%%" % avg_w, "vs %.1f%% avg loser" % avg_l, GREEN)
@@ -1034,9 +1492,9 @@ elif page_selection == "Swing Book":
             entry, stop = float(row["Entry"]), float(row["Stop"])
             targets = [float(row[t]) for t in ["T1", "T2", "T3"] if t in row and pd.notna(row[t]) and str(row[t]).strip() != ""]
             cur = live.get(tkr)
-            sector = str(row.get("Sector", "")).strip()
-            opened = str(row.get("Date_Opened", "")).strip()
-            thesis = str(row.get("Thesis", "")).strip()
+            sector = clean_str(row.get("Sector"))
+            opened = clean_str(row.get("Date_Opened"))
+            thesis = clean_str(row.get("Thesis"))
 
             is_long = side == "Long"
             side_color = GREEN if is_long else RED
@@ -1253,8 +1711,8 @@ elif page_selection == "Swing Book":
                     else:
                         todo = "<span style='color:" + GREEN + ";'>Nothing to do</span>"
                     resv = ("<span style='color:" + (GREEN if act["result"] >= 0 else RED) + ";font-weight:600;'>"
-                            + "{:+.1f}%".format(act["result"]) + "</span>") if act["result"] is not None else "<span style='color:" + MUTED + ";'>&mdash;</span>"
-                    last_txt = "{:,.2f}".format(res["last"]) if res["last"] is not None else "&mdash;"
+                            + "{:+.1f}%".format(act["result"]) + "</span>") if act["result"] is not None else "<span style='color:" + MUTED + ";'>-</span>"
+                    last_txt = "{:,.2f}".format(res["last"]) if res["last"] is not None else "-"
                     body_rows += ("<tr style='" + ("background:rgba(240,185,11,.06);" if act["sev"] == "act" else "") + "'>"
                                   "<td style='font-weight:700;'>" + prow["Ticker"] + "</td>"
                                   "<td style='color:" + MUTED + ";'>" + side_txt + "</td>"
@@ -1297,7 +1755,7 @@ elif page_selection == "Swing Book":
     st.markdown("### Closed Trades")
     if closed_df.empty:
         st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13px;'>"
-                    "The book is brand new — no closed trades yet. Every exit is logged here as it happens, winners and losers alike, starting with trade #1. "
+                    "The book is brand new, so there are no closed trades yet. Every exit is logged here as it happens, winners and losers alike, starting with trade #1. "
                     "The scoreboard above switches to live performance stats once the first trades close.</div>", unsafe_allow_html=True)
     else:
         cd = closed_df.sort_values("Date_Closed_dt", ascending=False, na_position="last")
@@ -1334,7 +1792,7 @@ elif page_selection == "Swing Book":
                     cells += ("<td style='text-align:right; color:" + MUTED + ";'>" + "{:+.1f}%".format(sp) + "</td>"
                               "<td style='text-align:right; font-weight:600; color:" + al_c + ";'>" + "{:+.1f}%".format(al) + "</td>")
                 else:
-                    cells += "<td style='text-align:right; color:" + MUTED + ";'>—</td><td style='text-align:right; color:" + MUTED + ";'>—</td>"
+                    cells += "<td style='text-align:right; color:" + MUTED + ";'>-</td><td style='text-align:right; color:" + MUTED + ";'>-</td>"
             rows_html += "<tr>" + cells + "</tr>"
 
         table = ("<style>"
@@ -1348,7 +1806,7 @@ elif page_selection == "Swing Book":
         st.markdown(table, unsafe_allow_html=True)
         if has_spy:
             st.caption("SPX shows what the index did over the same dates. "
-                       "vs SPX is the difference — the value the trade added over simply owning the index.")
+                       "vs SPX is the difference: the value the trade added over simply owning the index.")
 
     # ---- Monthly performance vs SPX ----
     st.divider()
@@ -1486,6 +1944,140 @@ elif page_selection == "Swing Book":
                         "<span style='font-size:13px; color:#cdd8e4;'><strong>How this is calculated.</strong> " + method
                         + "</span></div>", unsafe_allow_html=True)
 
+    # ---- Screener shadow book (operator only) ----
+    # Every setup the swing screener raises is tracked as if it had been entered, whether or not it was
+    # taken, so the strategy's own performance can be read separately from which trades were actually
+    # opened. Nothing is stored: the shared rules are replayed over price history each time.
+    if operator:
+        st.markdown("<div class='ns-section' style='margin-top:26px;'>🎯 Screener Shadow Book "
+                    "<span style='font-size:12px; font-weight:400; text-transform:none; letter-spacing:0; color:" + MUTED
+                    + ";'>&nbsp;operator only, not shown to readers</span></div>", unsafe_allow_html=True)
+        st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                    "Every setup the Swing Screener has raised since " + SHADOW_START.strftime("%b %d")
+                    + ", tracked whether or not you took it. A setup is entered at the <strong>next open</strong>, but only "
+                      "if that open is still inside its Valid open range; otherwise it is recorded as skipped. It is then "
+                      "managed by the same stop, breakeven-after-T1 and 50 / 25 / 25 rules as the book above, with the "
+                      "screener's public rule set (not any settings tried on the Screener page). Positions are unlimited "
+                      "and each trade stands alone, so this measures the strategy, not an account.</p>",
+                    unsafe_allow_html=True)
+
+        try:
+            _now_et = pd.Timestamp.now(tz="US/Eastern")
+        except Exception:
+            _now_et = pd.Timestamp.now()
+        _live = (_now_et.weekday() < 5) and (9 <= _now_et.hour < 16)
+        _today = _now_et.normalize().date()
+        _end_str = (pd.Timestamp.now().normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+        @st.cache_data(ttl=3600, show_spinner="Replaying the screener since it started...")
+        def get_shadow_trades(end_str, live, today_iso):
+            data = get_universe_ohlc(tuple(UNIVERSE), end_str)
+            if not data:
+                return None
+            if live:       # today's bar is unfinished, so work from the last completed session, as the screener does
+                data = {t_: (d_.iloc[:-1] if len(d_) and d_.index[-1].date().isoformat() == today_iso else d_)
+                        for t_, d_ in data.items()}
+            sx_ = fetch_history("^SPX", period="2y", interval="1d")
+            if sx_ is None or len(sx_) < 70:
+                return None
+            return shadow_replay(data, sx_, SCREEN_DEFAULTS, SHADOW_START)
+
+        sh_err = None
+        try:
+            sh_trades = get_shadow_trades(_end_str, _live, _today.isoformat())
+        except Exception as e_:
+            sh_trades, sh_err = None, e_
+
+        if sh_trades is None:
+            if sh_err is not None:      # a code problem must not pose as a data problem
+                st.warning("The shadow book could not be built: %s: %s" % (type(sh_err).__name__, str(sh_err)[:160]))
+            else:
+                st.info("Price history could not be loaded right now. Reload in a minute.")
+        elif not sh_trades:
+            st.info("The screener has not raised a setup since " + SHADOW_START.strftime("%b %d") + ".")
+        else:
+            S = shadow_summary(sh_trades)
+            for x_ in sh_trades:
+                x_["mine"] = book_match(x_, book)
+            took = sum(1 for x_ in sh_trades if x_["status"] in ("Open", "Closed") and x_["mine"])
+
+            def _sg(v, d=1):
+                return ("{:+." + str(d) + "f}").format(v)
+            tl = tile("Entered", str(S["entered"]), "%d closed, %d open" % (S["closed"], S["open"]))
+            tl += tile("Win rate", ("%.0f%%" % S["win_rate"]) if S["win_rate"] is not None else "n/a",
+                       ("%d of %d closed" % (S["wins"], S["closed"])) if S["closed"] else "none closed yet",
+                       (GREEN if S["win_rate"] >= 50 else AMBER) if S["win_rate"] is not None else MUTED)
+            tl += tile("Average R", (_sg(S["avg_r"], 2) + "R") if S["avg_r"] is not None else "n/a", "per closed trade",
+                       (GREEN if S["avg_r"] > 0 else RED) if S["avg_r"] is not None else MUTED)
+            tl += tile("Reached T1", "%d of %d" % (S["reached_t1"], S["entered"]) if S["entered"] else "n/a", "of trades entered")
+            tl += tile("Vs owning SPX", (_sg(S["avg_vs_spx"]) + " pts") if S["avg_vs_spx"] is not None else "n/a",
+                       "avg per closed trade", (GREEN if S["avg_vs_spx"] > 0 else RED) if S["avg_vs_spx"] is not None else MUTED)
+            tl += tile("You took", "%d of %d" % (took, S["entered"]) if S["entered"] else "n/a", "also opened in your book")
+            st.markdown("<div class='ns-row'>" + tl + "</div>", unsafe_allow_html=True)
+
+            notes = []
+            sk = [x_ for x_ in sh_trades if x_["status"] == "Skipped"]
+            if sk:
+                notes.append("<strong>%d skipped</strong> because the next open was outside the valid range: %s."
+                             % (len(sk), ", ".join("%s %s (opened %s)" % (x_["t"], x_["signal_date"].strftime("%b %d"),
+                                                                           "{:,.2f}".format(x_["entry"])) for x_ in sk[-8:])
+                                + (" and %d earlier" % (len(sk) - 8) if len(sk) > 8 else "")))
+            if S["pending"]:
+                notes.append("<strong>%d pending</strong>: raised at the latest close, entering at the next open if it is "
+                             "still in range." % S["pending"])
+            if notes:
+                st.markdown("<div class='ns-panel' style='border-left:3px solid " + BLUE + ";'><span style='font-size:13.5px;"
+                            "color:#cdd8e4;'>" + " ".join(notes) + "</span></div>", unsafe_allow_html=True)
+
+            shown = [x_ for x_ in sh_trades if x_["status"] in ("Pending", "Open", "Closed")]
+            shown.sort(key=lambda x_: (0 if x_["status"] in ("Pending", "Open") else 1, -pd.Timestamp(x_["signal_date"]).toordinal()))
+            body_h = ""
+            for x_ in shown[:40]:
+                is_l = x_["side"] == "Long"
+                chip = ("<span style='border:1px solid " + AMBER + ";color:" + AMBER + ";font-size:9.5px;font-weight:600;"
+                        "padding:1px 6px;border-radius:4px;margin-left:8px;'>YOURS</span>") if x_["mine"] else ""
+                if x_["status"] == "Pending":
+                    ent_h = "<span style='color:" + MUTED + ";'>next open</span>"
+                    out_h = ("<span style='color:" + MUTED + ";'>Pending: enters between " + "{:,.2f}".format(x_["open_lo"])
+                             + " and " + "{:,.2f}".format(x_["open_hi"]) + "</span>")
+                    ex_h = res_h = r_h = spx_h = "<span style='color:" + MUTED + ";'>-</span>"
+                else:
+                    ent_h = "{:,.2f}".format(x_["entry"])
+                    how = x_["how"]
+                    o_col = RED if how == "Stopped out" else (AMBER if how.startswith("Breakeven") else (GREEN if (x_["hits"] >= 1) else TEXT))
+                    out_h = "<span style='color:" + o_col + ";font-weight:600;'>" + how + "</span>"
+                    ex_h = x_["exit_date"].strftime("%b %d") if x_["exit_date"] else "<span style='color:" + MUTED + ";'>open</span>"
+                    res_h = ("<span style='color:" + (GREEN if x_["result"] >= 0 else RED) + ";font-weight:600;'>" + _sg(x_["result"]) + "%</span>"
+                             + ("" if x_["status"] == "Closed" else " <span style='color:" + MUTED + ";font-size:11px;'>marked</span>"))
+                    r_h = ("<span style='color:" + MUTED + ";'>" + _sg(x_["r_mult"], 2) + "R</span>") if x_.get("r_mult") is not None else "-"
+                    spx_h = ("<span style='color:" + MUTED + ";'>" + _sg(x_["spx"]) + "%</span>") if x_.get("spx") is not None else "-"
+                body_h += ("<tr><td style='color:" + MUTED + ";'>" + x_["signal_date"].strftime("%b %d") + "</td>"
+                           "<td style='font-weight:700;'>" + x_["t"] + chip + "</td>"
+                           "<td style='color:" + (GREEN if is_l else RED) + ";'>" + x_["side"] + "</td>"
+                           "<td style='text-align:right;'>" + ent_h + "</td>"
+                           "<td style='text-align:right;color:" + RED + ";'>" + "{:,.2f}".format(x_["stop"]) + "</td>"
+                           "<td style='text-align:right;color:" + GREEN + ";'>" + "{:,.2f}".format(x_["tg"][0]) + "</td>"
+                           "<td>" + out_h + "</td><td>" + ex_h + "</td>"
+                           "<td style='text-align:right;'>" + res_h + "</td><td style='text-align:right;'>" + r_h + "</td>"
+                           "<td style='text-align:right;'>" + spx_h + "</td></tr>")
+            st.markdown("<style>.shx{width:100%;border-collapse:collapse;background:#151b26;border:1px solid #232c3d;font-size:13.5px;"
+                        "font-family:'IBM Plex Mono',monospace;margin-top:10px;}.shx th{font-family:'IBM Plex Sans',sans-serif;"
+                        "font-size:11.5px;text-transform:uppercase;letter-spacing:0.8px;color:#a8b6c6;padding:10px 12px;"
+                        "border-bottom:1px solid #232c3d;font-weight:600;text-align:left;}.shx td{padding:9px 12px;"
+                        "border-bottom:1px solid #1c2434;color:#e6edf3;vertical-align:top;}</style>"
+                        "<table class='shx'><tr><th>Signal</th><th>Ticker</th><th>Side</th><th style='text-align:right;'>Entry</th>"
+                        "<th style='text-align:right;'>Stop</th><th style='text-align:right;'>T1</th><th>Outcome</th><th>Exit</th>"
+                        "<th style='text-align:right;'>Result</th><th style='text-align:right;'>R</th>"
+                        "<th style='text-align:right;'>SPX</th></tr>" + body_h + "</table>", unsafe_allow_html=True)
+            st.markdown("<p style='color:" + MUTED + "; font-size:12.5px; margin:8px 2px 0 2px;'>"
+                        + ("Showing the %d most recent of %d trades. " % (40, len(shown)) if len(shown) > 40 else "")
+                        + "Hypothetical: it assumes a fill at the open and treats any bar touching both the stop and a target as "
+                          "a stop. It is recomputed from price history each time rather than stored, so a borderline signal "
+                          "can shift slightly when a dividend adjusts old prices, and with this method the record reaches back "
+                          "about six months. R is the result divided by the risk from the actual fill to the stop. "
+                          "<strong>YOURS</strong> marks a name your book opened within a week of the signal. "
+                          "Vs owning SPX is the trade's result minus the index over the same days.</p>", unsafe_allow_html=True)
+
     st.markdown("<p style='color:" + MUTED + "; font-size:11px; text-align:center; margin-top:18px;'>"
                 "This is not trading advice. This is purely for information/education. Positions reflect the author's own tracking portfolio.</p>", unsafe_allow_html=True)
 
@@ -1506,7 +2098,7 @@ elif page_selection == "Weekly Recap":
                  "JPM", "GS", "BAC", "V", "MA", "XOM", "CVX", "COP", "UNH", "LLY", "JNJ", "MRK",
                  "CAT", "BA", "GE", "WMT", "COST", "HD", "PG", "KO", "DIS", "CRM", "ORCL", "PLTR"]
 
-    # Asset registry — add a row here to support another product later.
+    # Asset registry: add a row here to support another product later.
     # "peer" is the counterpart shown in the comparison tile; "futures" adds an overnight session block.
     WEEKLY_ASSETS = {
         "S&P 500 Index (SPX)":   dict(yf="^SPX",  sheet="^SPX",  label="SPX", peer="^NDX", peer_label="NDX", futures=False),
@@ -1522,7 +2114,7 @@ elif page_selection == "Weekly Recap":
         asset_choice = st.radio("Product:", list(WEEKLY_ASSETS.keys()), horizontal=True)
     A = WEEKLY_ASSETS[asset_choice]
     _title_ph.markdown("<p style='color:" + MUTED + "; font-size:15px; margin-top:-10px;'>Showing <strong style='color:"
-                       + TEXT + ";'>" + A["label"] + "</strong> — how the week traded, measured against the levels published before each open.</p>",
+                       + TEXT + ";'>" + A["label"] + "</strong>: how the week traded, measured against the levels published before each open.</p>",
                        unsafe_allow_html=True)
     offset = 0 if week_choice == "This week" else 1
     try:
@@ -1545,7 +2137,7 @@ elif page_selection == "Weekly Recap":
     if week_complete:
         st.markdown("<div style='background:" + PANEL + "; border:1px solid " + LINE + "; border-left:3px solid " + GREEN
                     + "; border-radius:0 8px 8px 0; padding:11px 15px; margin-bottom:6px;'>"
-                    "<span style='font-size:13.5px; color:#cdd8e4;'><strong>" + range_txt + " — complete.</strong> "
+                    "<span style='font-size:13.5px; color:#cdd8e4;'><strong>" + range_txt + ": complete.</strong> "
                     "All five sessions are settled; nothing below will change.</span></div>", unsafe_allow_html=True)
     else:
         done = [d.strftime("%a") for d in pd.date_range(week_start, min(now_et.normalize(), week_end)) if d.weekday() < 5]
@@ -1557,7 +2149,7 @@ elif page_selection == "Weekly Recap":
             partial = " " + done[-1] + " has settled; the rest of the week is still to come."
         st.markdown("<div style='background:" + PANEL + "; border:1px solid " + LINE + "; border-left:3px solid " + AMBER
                     + "; border-radius:0 8px 8px 0; padding:11px 15px; margin-bottom:6px;'>"
-                    "<span style='font-size:13.5px; color:#cdd8e4;'><strong>Week to date — " + range_txt + ".</strong> "
+                    "<span style='font-size:13.5px; color:#cdd8e4;'><strong>Week to date: " + range_txt + ".</strong> "
                     "Every section below covers Monday's open through the latest print, not a finished week."
                     + partial + " Publish from the completed week for final numbers.</span></div>",
                     unsafe_allow_html=True)
@@ -1587,8 +2179,8 @@ elif page_selection == "Weekly Recap":
     except Exception as e:
         bars = None
         if "RateLimit" in type(e).__name__ or "rate" in str(e).lower():
-            st.warning("Yahoo Finance is rate-limiting requests right now. Wait a minute and reload — "
-                       "the data is cached for 15 minutes once it loads.")
+            st.warning("Yahoo Finance is rate-limiting requests right now. Wait a minute and reload. "
+                       "The data is cached for 15 minutes once it loads.")
         else:
             st.warning("Market data could not be loaded right now. Wait a moment and reload.")
         st.stop()
@@ -1712,7 +2304,7 @@ elif page_selection == "Weekly Recap":
         n_rows_all = len(clusters)
 
         style_map = {"hold": ("rgba(38,166,154,.22)", GREEN, "HELD"), "break": ("rgba(239,83,80,.22)", RED, "BRK"),
-                     "both": ("rgba(240,185,11,.30)", AMBER, "LBAF"), "none": ("#141a24", "#3d4757", "\u2014"),
+                     "both": ("rgba(240,185,11,.30)", AMBER, "LBAF"), "none": ("#141a24", "#3d4757", "-"),
                      "unpub": ("transparent", "#2b3444", "\u00b7")}
 
         # Grade every cluster first, then decide which rows are worth showing
@@ -1830,7 +2422,7 @@ elif page_selection == "Weekly Recap":
         st.markdown("<p class='ns-sub' style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                     "<strong style='color:" + AMBER + ";'>LBAF</strong> = look below and fail, price swept the support and closed back above · "
                     "<strong style='color:" + AMBER + ";'>LAAF</strong> = look above and fail, price poked the resistance and closed back below · "
-                    "HELD = support held on the test · REJ = resistance turned it away · BRK = closed through · — = price never reached it. "
+                    "HELD = support held on the test · REJ = resistance turned it away · BRK = closed through · a dash = price never reached it. "
                     "Graded by the role the level actually had at the open; an asterisk means a gap flipped it from the side it was published on.</p>",
                     unsafe_allow_html=True)
         st.markdown("<div class='ns-panel'>" + card_html + "</div>", unsafe_allow_html=True)
@@ -1847,7 +2439,7 @@ elif page_selection == "Weekly Recap":
                     rc_txt = ("{:,.0f}".format(s["reclaim"]["price"]) + " <span style='color:" + MUTED + ";font-size:11.5px;'>"
                               + s["reclaim"]["ts"].strftime("%H:%M") + "</span>")
                 else:
-                    rc_txt = "&mdash;"
+                    rc_txt = "-"
                 rows_html += ("<tr><td style='color:" + MUTED + ";'>" + s["day"].strftime("%a") + "</td>"
                               "<td style='font-weight:600;color:" + (GREEN if s["sup"] else RED) + ";'>" + kind + "</td>"
                               "<td>" + zone_txt + ("*" if s["flipped"] else "") + "</td>"
@@ -1856,7 +2448,7 @@ elif page_selection == "Weekly Recap":
                               "<td style='text-align:right;'>" + "{:,.0f}".format(s["close"]) + "</td>"
                               "<td style='text-align:right;font-weight:700;color:"
                               + ((GREEN if s["pts"] >= 0 else RED) if s["pts"] is not None else MUTED) + ";'>"
-                              + ("{:+,.0f}".format(s["pts"]) if s["pts"] is not None else "&mdash;") + "</td></tr>")
+                              + ("{:+,.0f}".format(s["pts"]) if s["pts"] is not None else "-") + "</td></tr>")
             st.markdown("<div class='ns-section' style='margin-top:18px;'>🎯 Setups That Fired</div>",
                         unsafe_allow_html=True)
             st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
@@ -1875,7 +2467,7 @@ elif page_selection == "Weekly Recap":
     # ---------- 2. Where the week was fought (time at price) ----------
     st.markdown("<div class='ns-section'>📊 Where The Week Was Fought</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Share of 15-minute closes by price bucket — the prices that actually mattered. Builds through the week as bars print.</p>", unsafe_allow_html=True)
+                "Share of 15-minute closes by price bucket: the prices that actually mattered. Builds through the week as bars print.</p>", unsafe_allow_html=True)
     bucket = max(5, round(wk_range / 12.0 / 5.0) * 5)
     closes = bars["Close"].dropna()
     b_idx = (closes / bucket).round().astype(int)
@@ -1900,7 +2492,7 @@ elif page_selection == "Weekly Recap":
     # ---------- 3. When the money moved ----------
     st.markdown("<div class='ns-section'>🕐 When The Money Moved</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Net points by session block — where the week's trend actually got made.</p>", unsafe_allow_html=True)
+                "Net points by session block: where the week's trend actually got made.</p>", unsafe_allow_html=True)
     blocks = [("Open → 11a", 9, 11), ("Midday", 11, 14), ("2p → Close", 14, 16)]
     if A["futures"]:
         blocks = [("Overnight", 4, 9)] + blocks   # Globex into the RTH open
@@ -1925,7 +2517,7 @@ elif page_selection == "Weekly Recap":
         for d in days:
             v = cell_vals[(bname, d)]
             if v is None:
-                bgc, fgc, txt = "#141a24", "#3d4757", "—"
+                bgc, fgc, txt = "#141a24", "#3d4757", "-"
             else:
                 inten = min(0.62, 0.10 + abs(v) / mx * 0.52)
                 bgc = ("rgba(38,166,154,%.2f)" % inten) if v >= 0 else ("rgba(239,83,80,%.2f)" % inten)
@@ -2117,7 +2709,7 @@ elif page_selection == "Weekly Recap":
                 trig = "{:,.2f}".format(s_["trigger"]) if s_["trigger"] is not None else ""
                 if s_["state"] == "now":
                     todo = "<span style='color:" + MUTED + ";'>In range now: check the Swing Screener</span>"
-                    away = "<span style='color:" + MUTED + ";'>&mdash;</span>"
+                    away = "<span style='color:" + MUTED + ";'>-</span>"
                 elif s_["state"] in ("extended", "coiling"):
                     todo = (("Dip to " if is_long else "Bounce to ") + "<strong>" + trig + "</strong> (21MA), then close back "
                             + ("above" if is_long else "below"))
@@ -2128,7 +2720,7 @@ elif page_selection == "Weekly Recap":
                 elif s_["state"] == "notstacked":
                     todo = ("The 21MA (<strong>{:,.2f}</strong>) has to cross " + ("above" if is_long else "below")
                             + " the 50MA (<strong>{:,.2f}</strong>)").format(s_["m21"], s_["m50"])
-                    away = "<span style='color:" + MUTED + ";'>&mdash;</span>"
+                    away = "<span style='color:" + MUTED + ";'>-</span>"
                 else:
                     todo = ("Reclaim " if is_long else "Lose ") + "<strong>" + trig + "</strong> first"
                     away = "{:+.1f}%".format(s_["away"])
@@ -2246,88 +2838,6 @@ elif page_selection == "Swing Screener":
                 "and targets at real levels. Nothing is listed unless the reward pays for the risk.</p>",
                 unsafe_allow_html=True)
 
-    UNIVERSE_SECTORS = {
-        # semis
-        "NVDA":"Semiconductors","AVGO":"Semiconductors","AMD":"Semiconductors","QCOM":"Semiconductors",
-        "TXN":"Semiconductors","AMAT":"Semiconductors","MU":"Semiconductors","LRCX":"Semiconductors",
-        "KLAC":"Semiconductors","ADI":"Semiconductors","MRVL":"Semiconductors","NXPI":"Semiconductors",
-        "ON":"Semiconductors","MCHP":"Semiconductors","INTC":"Semiconductors","SWKS":"Semiconductors",
-        "QRVO":"Semiconductors","TER":"Semiconductors","SMCI":"Semiconductors",
-        # software
-        "MSFT":"Software","ADBE":"Software","CRM":"Software","ORCL":"Software","NOW":"Software",
-        "PANW":"Software","CRWD":"Software","ZS":"Software","DDOG":"Software","NET":"Software",
-        "MDB":"Software","TEAM":"Software","WDAY":"Software","INTU":"Software","ADSK":"Software",
-        "ANSS":"Software","SNPS":"Software","CDNS":"Software","SNOW":"Software","PLTR":"Software",
-        # hardware / IT services
-        "AAPL":"Tech Hardware","CSCO":"Tech Hardware","IBM":"Tech Hardware","ACN":"Tech Hardware",
-        "INFY":"Tech Hardware","HPQ":"Tech Hardware","DELL":"Tech Hardware","WDC":"Tech Hardware",
-        "STX":"Tech Hardware","APH":"Tech Hardware","GLW":"Tech Hardware","KEYS":"Tech Hardware",
-        # internet / media
-        "GOOGL":"Internet & Media","META":"Internet & Media","NFLX":"Internet & Media","DIS":"Internet & Media",
-        "CMCSA":"Internet & Media","CHTR":"Internet & Media","WBD":"Internet & Media","PARA":"Internet & Media",
-        "EA":"Internet & Media","TTWO":"Internet & Media","RBLX":"Internet & Media","SPOT":"Internet & Media",
-        "UBER":"Internet & Media","LYFT":"Internet & Media","DASH":"Internet & Media","ABNB":"Internet & Media",
-        "BKNG":"Internet & Media",
-        "T":"Telecom","VZ":"Telecom","TMUS":"Telecom",
-        # financials
-        "JPM":"Banks","BAC":"Banks","WFC":"Banks","C":"Banks","USB":"Banks","PNC":"Banks","TFC":"Banks",
-        "COF":"Banks","DFS":"Banks","SYF":"Banks",
-        "GS":"Capital Markets","MS":"Capital Markets","SCHW":"Capital Markets","BLK":"Capital Markets",
-        "BX":"Capital Markets","KKR":"Capital Markets","APO":"Capital Markets","TROW":"Capital Markets",
-        "BEN":"Capital Markets","AMP":"Capital Markets","ICE":"Capital Markets","CME":"Capital Markets",
-        "NDAQ":"Capital Markets","MSCI":"Capital Markets","SPGI":"Capital Markets","MCO":"Capital Markets",
-        "V":"Payments","MA":"Payments","AXP":"Payments","PYPL":"Payments","FI":"Payments",
-        # healthcare
-        "JNJ":"Pharma","LLY":"Pharma","PFE":"Pharma","MRK":"Pharma","ABBV":"Pharma","BMY":"Pharma","ZTS":"Pharma",
-        "AMGN":"Biotech","GILD":"Biotech","BIIB":"Biotech","VRTX":"Biotech","REGN":"Biotech","MRNA":"Biotech",
-        "TMO":"Medical Devices","DHR":"Medical Devices","ABT":"Medical Devices","SYK":"Medical Devices",
-        "BSX":"Medical Devices","MDT":"Medical Devices","EW":"Medical Devices","ISRG":"Medical Devices",
-        "BDX":"Medical Devices",
-        "UNH":"Healthcare Services","HCA":"Healthcare Services","CI":"Healthcare Services","CVS":"Healthcare Services",
-        "ELV":"Healthcare Services","MCK":"Healthcare Services","COR":"Healthcare Services",
-        # energy, split so refiners cannot stack
-        "VLO":"Refiners","MPC":"Refiners","PSX":"Refiners","DINO":"Refiners",
-        "XOM":"Oil & Gas","CVX":"Oil & Gas","COP":"Oil & Gas","EOG":"Oil & Gas","OXY":"Oil & Gas",
-        "DVN":"Oil & Gas","FANG":"Oil & Gas","HES":"Oil & Gas","APA":"Oil & Gas","MRO":"Oil & Gas",
-        "CTRA":"Oil & Gas","EQT":"Oil & Gas",
-        "SLB":"Oil Services","HAL":"Oil Services","BKR":"Oil Services",
-        "KMI":"Midstream","WMB":"Midstream","OKE":"Midstream","TRGP":"Midstream","LNG":"Midstream",
-        # industrials
-        "CAT":"Industrials","DE":"Industrials","HON":"Industrials","MMM":"Industrials","EMR":"Industrials",
-        "ETN":"Industrials","PH":"Industrials","ITW":"Industrials","CMI":"Industrials","PCAR":"Industrials",
-        "URI":"Industrials","FAST":"Industrials","GWW":"Industrials","ROK":"Industrials","DOV":"Industrials",
-        "GE":"Industrials",
-        "BA":"Aerospace & Defense","LMT":"Aerospace & Defense","RTX":"Aerospace & Defense",
-        "NOC":"Aerospace & Defense","GD":"Aerospace & Defense",
-        "UNP":"Transports","CSX":"Transports","NSC":"Transports","UPS":"Transports","FDX":"Transports",
-        "DAL":"Transports","UAL":"Transports","LUV":"Transports",
-        "WM":"Waste","RSG":"Waste",
-        # consumer
-        "WMT":"Retail","COST":"Retail","TGT":"Retail","HD":"Retail","LOW":"Retail","DG":"Retail",
-        "DLTR":"Retail","KR":"Retail","TJX":"Retail","ROST":"Retail","ORLY":"Retail","AZO":"Retail",
-        "NKE":"Retail","LULU":"Retail",
-        "PG":"Staples","KO":"Staples","PEP":"Staples","PM":"Staples","MO":"Staples","MDLZ":"Staples",
-        "KHC":"Staples","GIS":"Staples","K":"Staples","HSY":"Staples","STZ":"Staples","KDP":"Staples",
-        "MNST":"Staples","CL":"Staples","KMB":"Staples","EL":"Staples","CHD":"Staples","CLX":"Staples",
-        "SYY":"Staples",
-        "MCD":"Restaurants & Travel","SBUX":"Restaurants & Travel","CMG":"Restaurants & Travel",
-        "YUM":"Restaurants & Travel","DRI":"Restaurants & Travel","MAR":"Restaurants & Travel",
-        "HLT":"Restaurants & Travel","LVS":"Restaurants & Travel","MGM":"Restaurants & Travel",
-        "RCL":"Restaurants & Travel","CCL":"Restaurants & Travel","NCLH":"Restaurants & Travel",
-        "GM":"Autos & Housing","F":"Autos & Housing","APTV":"Autos & Housing","LEN":"Autos & Housing",
-        "DHI":"Autos & Housing","PHM":"Autos & Housing","NVR":"Autos & Housing",
-        "AMZN":"Consumer Discretionary","TSLA":"Consumer Discretionary",
-        # materials, utilities, real estate
-        "LIN":"Materials","APD":"Materials","SHW":"Materials","ECL":"Materials","FCX":"Materials",
-        "NEM":"Materials","NUE":"Materials","STLD":"Materials","VMC":"Materials","MLM":"Materials",
-        "DOW":"Chemicals","DD":"Chemicals","PPG":"Chemicals","ALB":"Chemicals","CF":"Chemicals","MOS":"Chemicals",
-        "NEE":"Utilities","DUK":"Utilities","SO":"Utilities","D":"Utilities","AEP":"Utilities","EXC":"Utilities",
-        "SRE":"Utilities","XEL":"Utilities","ED":"Utilities","PEG":"Utilities","WEC":"Utilities","ES":"Utilities",
-        "PCG":"Utilities","VST":"Utilities","CEG":"Utilities",
-        "AMT":"REITs","PLD":"REITs","CCI":"REITs","EQIX":"REITs","PSA":"REITs","SPG":"REITs","O":"REITs",
-        "WELL":"REITs","DLR":"REITs","VICI":"REITs","AVB":"REITs","EQR":"REITs",
-    }
-    UNIVERSE = sorted(UNIVERSE_SECTORS.keys())
 
     # ── Operator controls are hidden unless the passcode matches ──
     try:
@@ -2389,31 +2899,6 @@ elif page_selection == "Swing Screener":
         st.caption("Candidates are generated from a fixed rule set: 21MA pullback in an established uptrend, "
                    "structural stop, minimum 2:1 reward to the first target, and a target reachable inside a swing timeframe.")
 
-    @st.cache_data(ttl=3600, show_spinner="Scanning the universe...")
-    def get_universe_ohlc(tickers, end_str):
-        start = (pd.Timestamp(end_str) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
-        out = {}
-        tl = list(tickers)
-        for i in range(0, len(tl), 120):
-            chunk = tl[i:i + 120]
-            try:
-                data = _fetch_with_retry(lambda c=chunk: yf.download(
-                    tickers=" ".join(c), start=start, end=end_str, interval="1d",
-                    group_by="ticker", auto_adjust=True, progress=False, threads=False))
-            except Exception:
-                continue
-            if data is None or len(data) == 0:
-                continue
-            for t in chunk:
-                try:
-                    df = data[t] if isinstance(data.columns, pd.MultiIndex) else data
-                    df = df.dropna(subset=["Close"])
-                    if len(df) > 120:
-                        out[t] = df
-                except Exception:
-                    continue
-        return out
-
     @st.cache_data(ttl=300)
     def get_open_book(url):
         """Tickers already held, so a repeat candidate is not mistaken for a new idea."""
@@ -2472,26 +2957,7 @@ elif page_selection == "Swing Screener":
     except Exception:
         pass
 
-    def pivots(series, lr=5, want_high=True):
-        w = lr * 2 + 1
-        roll = series.rolling(w, center=True).max() if want_high else series.rolling(w, center=True).min()
-        return series[(series == roll)].dropna()
-
-    def pick_targets(cands, atr, gap=1.0, n=3, last=None):
-        """Take targets nearest-first, skipping any closer than `gap` ATRs to the last one kept.
-
-        Two pivots a few cents apart are one level, not two. Counting them twice makes the
-        scale-out plan sell most of the position at essentially the same price. `last` lets a
-        second call carry on from targets already chosen.
-        """
-        out = []
-        for x in cands:
-            ref = out[-1] if out else last
-            if ref is None or abs(x - ref) >= atr * gap:
-                out.append(x)
-            if len(out) == n:
-                break
-        return out
+    pivots = swing_pivots
 
     def track_outcome(df, fired, entry, stop, tg, want_long):
         """Walk forward bar by bar from the session after a setup fired.
@@ -2521,104 +2987,10 @@ elif page_selection == "Swing Screener":
         return "T%d hit, still open" % hits, hits, False
 
     def scan(t, df, want_long):
-        c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
-        px = float(c.iloc[-1])
-        e21 = c.ewm(span=21, adjust=False).mean()
-        s50 = c.rolling(50).mean()
-        if pd.isna(s50.iloc[-1]):
-            return None
-        # Average true range: one ATR is roughly one session of movement, so the
-        # distance to a target in ATRs is an estimate of how long it would take.
-        pc = c.shift(1)
-        tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
-        atr = float(tr.tail(14).mean())
-        if not atr or pd.isna(atr) or atr <= 0:
-            return None
-        m21, m50 = float(e21.iloc[-1]), float(s50.iloc[-1])
-        ext = (px / m21 - 1.0) * 100.0
-        dv = float((c * v).tail(20).mean()) / 1e6
-        if dv < min_dv:
-            return None
-        rs = (px / float(c.iloc[-64]) - 1.0) * 100.0 if len(c) > 64 else None
-
-        if want_long:
-            if not (px > m21 > m50 and px > m50):
-                return None
-            if ext > max_ext:
-                return None
-            if not bool((df["Low"].iloc[-int(pullback_win):] < e21.iloc[-int(pullback_win):]).any()):
-                return None
-            if req_rs and (rs is None or spx_3m is None or rs <= spx_3m):
-                return None
-            stop = float(l.tail(10).min()) * 0.995
-            if stop >= px:
-                return None
-            risk = px - stop
-            if risk < atr * min_stop_atr:
-                return None
-            cand = sorted(set(round(float(x), 2) for x in pivots(h.tail(160), 5, True).values if x > px * 1.005))
-            tg = pick_targets(cand, atr)
-            if len(tg) < 3:
-                lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
-                rng = max(hi60 - lo60, px * 0.02)
-                fibs = sorted(set(round(lo60 + rng * m, 2) for m in (1.272, 1.618, 2.0) if lo60 + rng * m > px * 1.005))
-                if tg:
-                    fibs = [x for x in fibs if x > tg[-1]]      # only past the last real level
-                tg = tg + pick_targets(fibs, atr, n=3 - len(tg), last=tg[-1] if tg else None)
-            if not tg:
-                return None
-            rr = (tg[0] - px) / risk
-        else:
-            if not (px < m21 < m50 and px < m50):
-                return None
-            if abs(ext) > max_ext:
-                return None
-            if not bool((df["High"].iloc[-int(pullback_win):] > e21.iloc[-int(pullback_win):]).any()):
-                return None
-            if req_rs and (rs is None or spx_3m is None or rs >= spx_3m):
-                return None
-            stop = float(h.tail(10).max()) * 1.005
-            if stop <= px:
-                return None
-            risk = stop - px
-            if risk < atr * min_stop_atr:
-                return None
-            cand = sorted(set(round(float(x), 2) for x in pivots(l.tail(160), 5, False).values if x < px * 0.995),
-                          reverse=True)
-            tg = pick_targets(cand, atr)
-            if len(tg) < 3:
-                lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
-                rng = max(hi60 - lo60, px * 0.02)
-                fibs = sorted(set(round(hi60 - rng * m, 2) for m in (1.272, 1.618, 2.0) if 0 < hi60 - rng * m < px * 0.995),
-                              reverse=True)
-                if tg:
-                    fibs = [x for x in fibs if x < tg[-1]]      # only past the last real level
-                tg = tg + pick_targets(fibs, atr, n=3 - len(tg), last=tg[-1] if tg else None)
-            if not tg:
-                return None
-            rr = (px - tg[0]) / risk
-
-        if rr < min_rr:
-            return None
-        atr_t1 = abs(tg[0] - px) / atr
-        if atr_t1 > max_atr:
-            return None
-        # Entries here are the last close, but the order goes in at the next open. This is the range of
-        # opens at which the setup still clears the two rules that depend on the entry price, with the
-        # stop and T1 left where they are: reward at least min_rr times the risk, and a stop at least
-        # min_stop_atr ATRs away. Outside it the trade is no longer the one that was screened.
-        if want_long:
-            open_hi = (tg[0] + min_rr * stop) / (1.0 + min_rr)
-            open_lo = stop + atr * min_stop_atr
-        else:
-            open_lo = (min_rr * stop + tg[0]) / (1.0 + min_rr)
-            open_hi = stop - atr * min_stop_atr
-        # Flat sizing: every candidate gets the same share of the book, so the risk on each
-        # trade is whatever its stop distance makes it. The Risk column shows that figure.
-        return dict(t=t, sec=UNIVERSE_SECTORS.get(t, "Other"), px=px, stop=stop, tg=tg, rr=rr,
-                    ext=ext, rs=rs, atr=atr, atr_t1=atr_t1, stop_atr=risk / atr,
-                    open_lo=open_lo, open_hi=open_hi,
-                    raw=float(pos_cap), size=float(pos_cap), capped=False)
+        # the settings on this page, handed to the shared rules
+        return screen_setup(t, df, want_long, dict(min_dv=min_dv, max_ext=max_ext, pullback_win=pullback_win,
+                                                   req_rs=req_rs, min_stop_atr=min_stop_atr, min_rr=min_rr,
+                                                   max_atr=max_atr, pos_cap=pos_cap), spx_3m)
 
     def drop_reason(t, df, want_long):
         """First condition today's bar fails, plus whether the trend itself still holds.
@@ -2732,7 +3104,7 @@ elif page_selection == "Swing Screener":
             _shares = {"50 / 25 / 25": (50, 25, 25), "All out at T1": (100, 0, 0),
                        "Thirds": (33, 33, 34), "50 / 50 at T2": (50, 50, 0)}[scale_plan]
             _plan = " / ".join(str(s) + "%" for s in _shares if s > 0)
-            _vo = ("&mdash;" if r["held"] else "{:,.2f} to {:,.2f}".format(r["open_lo"], r["open_hi"]))
+            _vo = ("-" if r["held"] else "{:,.2f} to {:,.2f}".format(r["open_lo"], r["open_hi"]))
             _mark = ""
             if r.get("sector_held") and not r["held"]:
                 _mark += ("<span style='border:1px solid " + AMBER + "; color:" + AMBER + "; font-size:9.5px; "
@@ -2748,8 +3120,8 @@ elif page_selection == "Swing Screener":
                      "<td style='text-align:right;color:" + MUTED + ";white-space:nowrap;'>" + _vo + "</td>"
                      "<td style='text-align:right;color:" + RED + ";'>" + "{:,.2f}".format(r["stop"]) + "</td>"
                      "<td style='text-align:right;color:" + GREEN + ";'>" + "{:,.2f}".format(t1) + "</td>"
-                     "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:,.2f}".format(t2) if t2 else "—") + "</td>"
-                     "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:,.2f}".format(t3) if t3 else "—") + "</td>"
+                     "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:,.2f}".format(t2) if t2 else "-") + "</td>"
+                     "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:,.2f}".format(t3) if t3 else "-") + "</td>"
                      "<td style='text-align:right;font-weight:700;color:" + AMBER + ";'>" + "{:.1f}".format(r["rr"]) + "</td>"
                      "<td style='text-align:right;'>" + sz + "</td>"
                      "<td style='text-align:right;color:" + MUTED + ";'>" + "{:.2f}%".format(rk_val) + "</td>"
@@ -2835,6 +3207,7 @@ elif page_selection == "Swing Screener":
             df_t = data[t]
             r["outcome"], r["hits"], r["done"] = track_outcome(df_t, r["fired"], r["px"], r["stop"], r["tg"], want_long)
             lc = float(df_t["Close"].iloc[-1])
+            r["last"] = lc
             r["now"] = ((lc - r["px"]) / r["px"] * 100.0) if want_long else ((r["px"] - lc) / r["px"] * 100.0)
 
         today_set = {r["t"] for r in chosen}
@@ -2857,8 +3230,9 @@ elif page_selection == "Swing Screener":
                     + " sessions, dated by the first day each appeared and shown with that day's numbers. "
                       "<strong>Outcome</strong> walks price forward from the next session using the same stop and "
                       "targets: <strong>Open</strong> means neither the stop nor T1 has been touched, so the setup is "
-                      "still live; the stop moves to breakeven once T1 fills. <strong>Now</strong> is the move from that "
-                      "day's close to the latest close. The entry is that session's close, not a live price.</p>",
+                      "still live; the stop moves to breakeven once T1 fills. <strong>Last close</strong> is the latest completed session, not a live quote, "
+                      "and <strong>Now</strong> is the move from that day's close to it. The entry is that session's close, "
+                      "not a live price.</p>",
                     unsafe_allow_html=True)
 
         allp = list(prior.values())
@@ -2903,6 +3277,7 @@ elif page_selection == "Swing Screener":
                           "<td style='text-align:right;color:" + GREEN + ";'>" + "{:,.2f}".format(t1) + "</td>"
                           "<td style='text-align:right;font-weight:700;color:" + AMBER + ";'>" + "{:.1f}".format(r["rr"]) + "</td>"
                           "<td style='color:" + o_col + ";font-weight:600;'>" + r["outcome"] + "</td>"
+                          "<td style='text-align:right;'>" + "{:,.2f}".format(r["last"]) + "</td>"
                           "<td style='text-align:right;font-weight:600;color:" + (GREEN if r["now"] >= 0 else RED) + ";'>"
                           + "{:+.1f}%".format(r["now"]) + "</td>"
                           "<td style='color:" + MUTED + ";'>" + r["why"] + "</td></tr>")
@@ -2911,7 +3286,8 @@ elif page_selection == "Swing Screener":
                         "<th style='text-align:left;'>Fired</th><th style='text-align:right;'>Entry that day</th>"
                         "<th style='text-align:right;'>Stop</th><th style='text-align:right;'>T1</th>"
                         "<th style='text-align:right;'>R:R</th><th style='text-align:left;'>Outcome</th>"
-                        "<th style='text-align:right;'>Now</th><th style='text-align:left;'>Why it dropped</th>"
+                        "<th style='text-align:right;'>Last close</th><th style='text-align:right;'>Now</th>"
+                        "<th style='text-align:left;'>Why it dropped</th>"
                         "</tr>" + rows2 + "</table>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
