@@ -937,6 +937,76 @@ def mark_open(entry, side, partial, live):
     unreal = ret(live) * rem / 100.0
     return realised + unreal, unreal
 
+def _rgba(hex_color, alpha):
+    h = hex_color.lstrip("#")
+    return "rgba(%d,%d,%d,%.2f)" % (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), alpha)
+
+def add_level_layers(fig, zones, price, y_lo, y_hi):
+    """Draw every published level on the chart so it reads at a glance, and return what was decided for each.
+
+    zones: [(is_support, bottom, top, label)]. A level is a line when Bottom and Top are the same price and a band
+    when they differ. Colour follows where price is NOW: above price red, below green, price inside amber. A level
+    that has changed sides since it was published carries an arrow: a published support now above price shows a
+    triangle up, a published resistance now below price a triangle down. The two levels nearest price on each side
+    are bold. Every level is labelled at the right edge, next to the price axis, with its distance in points.
+    """
+    span = max(float(y_hi) - float(y_lo), 1.0)
+    have_px = price is not None and price == price
+    info = []
+    for is_sup, bottom, top, lbl in zones:
+        dist = None
+        if have_px:
+            dist = 0.0 if bottom <= price <= top else ((bottom - price) if bottom > price else (top - price))
+        info.append(dict(is_sup=is_sup, bottom=bottom, top=top, label=lbl, mid=(bottom + top) / 2.0, dist=dist,
+                         line=(top - bottom) < 0.01))
+    above = sorted([d for d in info if d["dist"] is not None and d["dist"] > 0], key=lambda d: d["dist"])
+    below = sorted([d for d in info if d["dist"] is not None and d["dist"] < 0], key=lambda d: -d["dist"])
+    key_ids = {id(d) for d in above[:2] + below[:2] + [d for d in info if d["dist"] == 0.0]}
+    for d in info:
+        if d["dist"] is None:
+            d["role"] = "support" if d["is_sup"] else "resistance"
+        else:
+            d["role"] = "resistance" if d["dist"] > 0 else ("support" if d["dist"] < 0 else "inside")
+        d["color"] = {"support": GREEN, "resistance": RED, "inside": AMBER}[d["role"]]
+        d["flip"] = ""
+        if d["dist"] is not None:
+            if d["is_sup"] and d["role"] == "resistance":
+                d["flip"] = "\u25b2"
+            elif (not d["is_sup"]) and d["role"] == "support":
+                d["flip"] = "\u25bc"
+        d["key"] = id(d) in key_ids
+        d["faint"] = not (y_lo <= d["bottom"] <= y_hi or y_lo <= d["top"] <= y_hi)
+        d["opacity"] = 0.95 if d["key"] else (0.32 if d["faint"] else 0.6)
+        d["width"] = 2.2 if d["key"] else 1.2
+
+    for d in info:
+        col = d["color"]
+        if d["line"]:
+            fig.add_shape(type="line", xref="paper", yref="y", x0=0, x1=1, y0=d["mid"], y1=d["mid"], layer="below",
+                          line=dict(color=col, width=d["width"]), opacity=d["opacity"])
+        else:
+            fig.add_hrect(y0=d["bottom"], y1=d["top"], line_width=0, fillcolor=col,
+                          opacity=(0.22 if d["key"] else 0.12), layer="below")
+            for edge in (d["bottom"], d["top"]):
+                fig.add_shape(type="line", xref="paper", yref="y", x0=0, x1=1, y0=edge, y1=edge, layer="below",
+                              line=dict(color=col, width=d["width"] * 0.7), opacity=d["opacity"])
+
+    x_slots, slot, last_y, sep = [0.915, 0.775, 0.635], 0, None, span * 0.04
+    for d in sorted(info, key=lambda d: d["mid"]):
+        slot = (slot + 1) % len(x_slots) if (last_y is not None and abs(d["mid"] - last_y) < sep) else 0
+        last_y, d["slot"] = d["mid"], slot
+        txt = level_name(d["is_sup"], d["bottom"], d["top"], d["label"]) + ((" " + d["flip"]) if d["flip"] else "")
+        if d["dist"] is not None:
+            tail = "inside" if d["dist"] == 0 else ("at price" if abs(d["dist"]) < 0.5 else "{:+.0f}".format(d["dist"]))
+            txt += " <span style='color:#c4cfdb'>" + tail + "</span>"
+        d["text"] = ("<b>" + txt + "</b>") if d["key"] else txt
+        fig.add_annotation(xref="paper", yref="y", x=x_slots[slot], y=d["mid"], xanchor="right",
+                           yanchor=("bottom" if d["line"] else "middle"), yshift=(2 if d["line"] else 0), text=d["text"],
+                           showarrow=False, font=dict(color="white", size=(13 if d["key"] else 12)),
+                           bgcolor=(_rgba(d["color"], 0.85) if d["key"] else "rgba(13,17,23,0.82)"),
+                           bordercolor=_rgba(d["color"], 0.85), borderwidth=1, borderpad=3)
+    return info
+
 # ==========================================
 # 2. SIDEBAR NAVIGATION ROUTER
 # ==========================================
@@ -1284,25 +1354,11 @@ if page_selection == "Live Cockpit":
         lbl = clean_str(row.get("Label"))
         all_zones.append((str(zone_type).strip().lower() == "support", bottom, top, lbl))
 
-    # Stagger labels so stacked zones do not overprint each other
-    all_zones.sort(key=lambda z: z[1])
-    last_label_y, x_slots, slot = None, [0.005, 0.17, 0.34], 0
-    full_span = max(y_hi - y_lo, 1.0)
-    for is_sup, bottom, top, lbl in all_zones:
-        fill_color = GREEN if is_sup else RED
-        mid = (bottom + top) / 2.0
-        if last_label_y is not None and abs(mid - last_label_y) < full_span * 0.05:
-            slot = (slot + 1) % len(x_slots)
-        else:
-            slot = 0
-        last_label_y = mid
-        zone_label = level_name(is_sup, bottom, top, lbl)
-        fig.add_hrect(y0=bottom, y1=top, line_width=1, line_color=fill_color,
-                      fillcolor=fill_color, opacity=0.16, layer="below")
-        fig.add_annotation(xref="paper", x=x_slots[slot], y=top, yanchor="top", xanchor="left",
-                           text=zone_label,
-                           showarrow=False, font=dict(color="white", size=12),
-                           bgcolor="rgba(13,17,23,0.75)", borderpad=2)
+    try:
+        px_now = float(latest_price)
+    except Exception:
+        px_now = None
+    add_level_layers(fig, all_zones, px_now, y_lo, y_hi)
 
     for y_val, tag in [(em_upper, "+1 SD"), (em_lower, "-1 SD")]:
         fig.add_hline(y=y_val, line_dash="dash", line_color="#00BFFF", line_width=1.2)
@@ -1320,7 +1376,10 @@ if page_selection == "Live Cockpit":
     st.plotly_chart(fig, theme=None, use_container_width=True,
                     config={"scrollZoom": True, "displaylogo": False,
                             "modeBarButtonsToRemove": ["select2d", "lasso2d"]})
-    st.caption("Chart opens zoomed to the session. Scroll or drag to zoom out. Every published level is plotted, including those outside the current view.")
+    st.caption("Chart opens zoomed to the session. Scroll or drag to zoom out: every published level is plotted, including those "
+               "outside the current view. Levels above the last price are red and below it green, and the two nearest each side are "
+               "bold. A triangle marks a level that has changed sides since it was published, and the number is its distance in points "
+               "from the last price.")
 
     st.divider()
 
