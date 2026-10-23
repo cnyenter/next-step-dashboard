@@ -833,6 +833,26 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
     trades.sort(key=lambda x: (x["signal_date"], x["t"]))
     return trades
 
+def walk_setup(hv, lv, i, entry, stop, tg, is_long):
+    """Where a setup that fired on bar `i` stands now, from the daily highs and lows after it.
+
+    Entry is that day's close. A bar that touches both the stop and a target counts as a stop, and the stop
+    moves to breakeven once T1 prints. Returns (outcome text, targets reached, finished): the same answers the
+    screener's original row-by-row walk gave, without building a row object for every bar.
+    """
+    n, stop_now, hits = len(tg), stop, 0
+    for j in range(i + 1, len(hv)):
+        hi, lo = hv[j], lv[j]
+        if (lo <= stop_now) if is_long else (hi >= stop_now):
+            return ("Stopped out", 0, True) if hits == 0 else ("T%d, then breakeven" % hits, hits, True)
+        while hits < n and ((hi >= tg[hits]) if is_long else (lo <= tg[hits])):
+            hits += 1
+            if hits == 1:
+                stop_now = entry
+        if hits == n:
+            return "All targets hit", hits, True
+    return ("Open", 0, False) if hits == 0 else ("T%d hit, still open" % hits, hits, False)
+
 def _spx_prep(spx):
     """The index's closes and its three-month return as of any date, for relative strength on that date."""
     sx = spx[["Close"]].dropna() if spx is not None and len(spx) else pd.DataFrame({"Close": []})
@@ -962,6 +982,7 @@ def add_level_layers(fig, zones, price, y_lo, y_hi):
     above = sorted([d for d in info if d["dist"] is not None and d["dist"] > 0], key=lambda d: d["dist"])
     below = sorted([d for d in info if d["dist"] is not None and d["dist"] < 0], key=lambda d: -d["dist"])
     key_ids = {id(d) for d in above[:2] + below[:2] + [d for d in info if d["dist"] == 0.0]}
+    key_ids |= {id(d) for d in info if re.search(r"\d+\s*ma|gap", str(d["label"] or ""), re.I)}   # the levels you trade around
     for d in info:
         if d["dist"] is None:
             d["role"] = "support" if d["is_sup"] else "resistance"
@@ -991,7 +1012,7 @@ def add_level_layers(fig, zones, price, y_lo, y_hi):
                 fig.add_shape(type="line", xref="paper", yref="y", x0=0, x1=1, y0=edge, y1=edge, layer="below",
                               line=dict(color=col, width=d["width"] * 0.7), opacity=d["opacity"])
 
-    x_slots, slot, last_y, sep = [0.915, 0.775, 0.635], 0, None, span * 0.04
+    x_slots, slot, last_y, sep = [0.945, 0.81, 0.675], 0, None, span * 0.04
     for d in sorted(info, key=lambda d: d["mid"]):
         slot = (slot + 1) % len(x_slots) if (last_y is not None and abs(d["mid"] - last_y) < sep) else 0
         last_y, d["slot"] = d["mid"], slot
@@ -1359,6 +1380,11 @@ if page_selection == "Live Cockpit":
     except Exception:
         px_now = None
     add_level_layers(fig, all_zones, px_now, y_lo, y_hi)
+    try:       # open on the data, with a margin on the right for the level labels; panning and zooming work as before
+        x_first, x_last = df_main.index[0], df_main.index[-1]
+        x_range = [x_first, x_last + (x_last - x_first) * 0.18]
+    except Exception:
+        x_range = None
 
     for y_val, tag in [(em_upper, "+1 SD"), (em_lower, "-1 SD")]:
         fig.add_hline(y=y_val, line_dash="dash", line_color="#00BFFF", line_width=1.2)
@@ -1367,7 +1393,7 @@ if page_selection == "Live Cockpit":
 
     fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=620,
                       yaxis=dict(side="right", range=[y_lo, y_hi], fixedrange=False, tickfont=dict(size=13)),
-                      xaxis=dict(fixedrange=False, tickfont=dict(size=13)),
+                      xaxis=dict(fixedrange=False, tickfont=dict(size=13), range=x_range),
                       dragmode="pan",
                       paper_bgcolor=BG, plot_bgcolor="#10151f",
                       margin=dict(l=10, r=10, t=34, b=10),
@@ -1376,10 +1402,8 @@ if page_selection == "Live Cockpit":
     st.plotly_chart(fig, theme=None, use_container_width=True,
                     config={"scrollZoom": True, "displaylogo": False,
                             "modeBarButtonsToRemove": ["select2d", "lasso2d"]})
-    st.caption("Chart opens zoomed to the session. Scroll or drag to zoom out: every published level is plotted, including those "
-               "outside the current view. Levels above the last price are red and below it green, and the two nearest each side are "
-               "bold. A triangle marks a level that has changed sides since it was published, and the number is its distance in points "
-               "from the last price.")
+    st.caption("Scroll or drag to zoom out. Every published level is plotted: red above the last price, green below, bold nearest, "
+               "a triangle when it has changed sides, numbers in points from price.")
 
     st.divider()
 
@@ -3166,7 +3190,9 @@ elif page_selection == "Swing Screener":
         lookback_sessions = st.number_input("Also show setups from the last N sessions", 1, 40, 20, 1,
                                            help="Re-runs the same rules against earlier closes, so a setup that "
                                                 "fired while you were away still shows up with the numbers it had "
-                                                "on the day. 1 means today only.")
+                                                "on the day. It always reaches back to the screener's first run, so "
+                                                "a setup stays until its stop or T1 is touched; this only looks "
+                                                "further back than that. 1 means today only.")
         max_atr = st.number_input("Max average daily ranges to T1", 4.0, 60.0, 15.0, 1.0,
                                   help="One ATR is roughly one session of movement, so 15 is about three weeks. "
                                        "A structurally valid target that sits 40 ATRs away is a position trade, not a swing.")
@@ -3235,33 +3261,6 @@ elif page_selection == "Swing Screener":
 
     pivots = swing_pivots
 
-    def track_outcome(df, fired, entry, stop, tg, want_long):
-        """Walk forward bar by bar from the session after a setup fired.
-
-        Daily bars cannot show the order of events inside a day, so a bar that touches both
-        the stop and a target is scored as a stop. Once T1 fills the stop moves to breakeven,
-        matching the scale-out rule. Returns (label, targets_hit, finished).
-        """
-        n = len(tg)
-        stop_now, hits = stop, 0
-        for d, bar in df.iterrows():
-            if d.date() <= fired:
-                continue
-            hi, lo = float(bar["High"]), float(bar["Low"])
-            if (lo <= stop_now) if want_long else (hi >= stop_now):
-                if hits == 0:
-                    return "Stopped out", 0, True
-                return "T%d, then breakeven" % hits, hits, True
-            while hits < n and ((hi >= tg[hits]) if want_long else (lo <= tg[hits])):
-                hits += 1
-                if hits == 1:
-                    stop_now = entry
-            if hits == n:
-                return "All targets hit", hits, True
-        if hits == 0:
-            return "Open", 0, False
-        return "T%d hit, still open" % hits, hits, False
-
     def scan(t, df, want_long):
         # the settings on this page, handed to the shared rules
         return screen_setup(t, df, want_long, dict(min_dv=min_dv, max_ext=max_ext, pullback_win=pullback_win,
@@ -3315,11 +3314,14 @@ elif page_selection == "Swing Screener":
     # Nothing is stored: the shared rules are replayed over recent closes, each day judged on the data that existed
     # then, and every setup is walked forward from the next session. A setup stays valid until its stop or T1 is
     # touched, however long ago it fired.
-    prior, valid_rows, resolved_rows, today_set = {}, [], [], {r["t"] for r in chosen}
+    prior, valid_rows, resolved_rows, today_set, start_d = {}, [], [], {r["t"] for r in chosen}, None
     if int(lookback_sessions) > 1 and data:
         ref_df = max(data.values(), key=len)
         last_d = ref_df.index[-1].date()
         start_d = ref_df.index[-min(int(lookback_sessions), len(ref_df))].date()
+        # A rolling window would drop a setup, or re-date it to a later day of the same pullback, the moment its first
+        # day scrolled out. Anchoring at the screener's first run keeps each one where it is until it is resolved.
+        start_d = min(start_d, SHADOW_START.date())
         P_now = dict(min_dv=min_dv, max_ext=max_ext, pullback_win=pullback_win, req_rs=req_rs,
                      min_stop_atr=min_stop_atr, min_rr=min_rr, max_atr=max_atr, pos_cap=pos_cap)
         by_t = {}
@@ -3327,9 +3329,10 @@ elif page_selection == "Swing Screener":
             if x["fired"] < last_d:                 # today's close is the main list above
                 by_t.setdefault(x["t"], []).append(x)
         for t, lst in by_t.items():
-            df_t, pick = data[t], None
+            df_t = data[t][~data[t].index.duplicated(keep="last")]      # the same frame find_signals indexed into
+            hv_, lv_, pick = df_t["High"].values.astype(float), df_t["Low"].values.astype(float), None
             for x in lst:                           # oldest first: the first setup that is still alive, else the first one
-                x["outcome"], x["hits"], x["done"] = track_outcome(df_t, x["fired"], x["px"], x["stop"], x["tg"], want_long)
+                x["outcome"], x["hits"], x["done"] = walk_setup(hv_, lv_, x["i"], x["px"], x["stop"], x["tg"], want_long)
                 if not x["done"] and pick is None:
                     pick = x
             r = pick if pick is not None else lst[0]
@@ -3456,7 +3459,7 @@ elif page_selection == "Swing Screener":
                     unsafe_allow_html=True)
         st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                     "A setup stays <strong>valid</strong> until its stop or T1 is touched, however long ago it fired. This replays "
-                    "the screener's rules over the last " + str(int(lookback_sessions) - 1) + " sessions, dates each name by the "
+                    "the screener's rules from its first run on " + (start_d.strftime("%b %d") if start_d else "day one") + ", dates each name by the "
                     "first day its setup appeared, and walks price forward from the next session; the stop moves to breakeven "
                     "once T1 fills. <strong>New entry</strong> asks a different question: would the last close still clear the "
                     "minimum reward to risk and stop distance with the same stop and T1? If not, the setup is live only for "
