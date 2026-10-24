@@ -634,6 +634,9 @@ def screen_setup(t, df, want_long, P, spx_3m, why=None):
 # SCREENER SHADOW BOOK
 # ==========================================
 SHADOW_START = pd.Timestamp("2026-09-25")   # the first screener run: signals from this close onward are tracked
+# Streamlit's cache notices edits to the cached function but not to shadow_replay, which it calls. Raise this number
+# whenever shadow_replay starts recording something new, so a deploy shows it at once and not up to an hour later.
+SHADOW_CACHE_VERSION = 2
 SHADOW_PLAN = (0.50, 0.25)                  # share sold at T1 and at T2; the rest goes at the stop or the last target
 
 def walk_trade(o, h, l, c, k, is_long, entry, stop, tg, plan=SHADOW_PLAN):
@@ -2276,7 +2279,7 @@ elif page_selection == "Swing Book":
         _end_str = (pd.Timestamp.now().normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
         @st.cache_data(ttl=3600, show_spinner="Replaying the screener since it started...")
-        def get_shadow_trades(end_str, live, today_iso):
+        def get_shadow_trades(end_str, live, today_iso, code_version):
             data = get_universe_ohlc(tuple(UNIVERSE), end_str)
             if not data:
                 return None
@@ -2290,7 +2293,7 @@ elif page_selection == "Swing Book":
 
         sh_err = None
         try:
-            sh_trades = get_shadow_trades(_end_str, _live, _today.isoformat())
+            sh_trades = get_shadow_trades(_end_str, _live, _today.isoformat(), SHADOW_CACHE_VERSION)
         except Exception as e_:
             sh_trades, sh_err = None, e_
 
