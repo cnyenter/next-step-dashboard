@@ -787,6 +787,13 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
             return None
         return (s_close[j1] / s_open[j0] - 1.0) * 100.0
 
+    csum = np.cumsum(np.insert(s_close, 0, 0.0))
+
+    def spx_above50_at(date):
+        """True or False: did SPX close above its 50-day average on `date`? None without 50 sessions of history."""
+        j = int(sidx.searchsorted(date, side="right")) - 1
+        return None if j < 49 else bool(s_close[j] > (csum[j + 1] - csum[j - 49]) / 50.0)
+
     w, tol, trades = int(P["pullback_win"]), 1e-9, []
     for t, df in data.items():
         prep = _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter)
@@ -809,7 +816,8 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
                 continue
             rec = dict(t=t, sec=res["sec"], side="Long" if is_long else "Short", signal_date=ix[i].date(),
                        signal_px=res["px"], stop=res["stop"], tg=list(res["tg"]), rr_signal=res["rr"],
-                       open_lo=res["open_lo"], open_hi=res["open_hi"], last=float(cv[-1]))
+                       open_lo=res["open_lo"], open_hi=res["open_hi"], last=float(cv[-1]),
+                       spx_up=spx_above50_at(ix[i]))
             if i == n - 1:
                 trades.append(dict(rec, status="Pending"))
                 continue
@@ -926,6 +934,64 @@ def shadow_summary(trades):
                 avg_r=(sum(rs) / len(rs) if rs else None),
                 reached_t1=sum(1 for x in ent if x["hits"] >= 1),
                 avg_vs_spx=(sum(vs) / len(vs) if vs else None))
+
+# Sectors that tend to hold up when the market is falling and lag when it rises. One list, edit it here.
+DEFENSIVE_SECTORS = {"Utilities", "Staples", "Healthcare Services", "Pharma", "Medical Devices", "Waste", "Telecom", "REITs"}
+
+def sector_group(sec):
+    return "Defensive" if sec in DEFENSIVE_SECTORS else "Cyclical"
+
+def shadow_splits(trades):
+    """The entered shadow trades cut two ways: by sector type and by SPX trend on the day the setup fired.
+
+    Both cuts use the same trades as the headline numbers, so each one adds back to the total. They exist to
+    show whether a pattern (for example shorts failing in an uptrend) is real or just one corner of the book.
+    """
+    ent = [x for x in trades if x["status"] in ("Open", "Closed")]
+
+    def stats(sub):
+        rs = [x["r_mult"] for x in sub if x.get("r_mult") is not None]
+        return dict(n=len(sub), closed=sum(1 for x in sub if x["status"] == "Closed"),
+                    stopped=sum(1 for x in sub if x["status"] == "Closed" and x["hits"] == 0),
+                    t1=sum(1 for x in sub if x["hits"] >= 1),
+                    avg_r=(sum(rs) / len(rs) if rs else None), net_r=sum(rs))
+    out = []
+    for side in ("Long", "Short"):
+        for grp in ("Defensive", "Cyclical"):
+            out.append(dict(cut="Sector type", side=side, label=grp.lower(),
+                            **stats([x for x in ent if x["side"] == side and sector_group(x["sec"]) == grp])))
+    for side in ("Long", "Short"):
+        for key, label in ((True, "SPX above its 50-day"), (False, "SPX below its 50-day"), (None, "trend unknown")):
+            sub = [x for x in ent if x["side"] == side and x.get("spx_up") is key]
+            if sub or key is not None:
+                out.append(dict(cut="SPX trend", side=side, label=label, **stats(sub)))
+    return out
+
+def shadow_splits_html(splits):
+    """The two cuts as one table. A row with fewer than four trades is greyed: too few to read anything into."""
+    def r_cell(v):
+        return "<td style='text-align:right;color:" + MUTED + ";'>n/a</td>" if v is None else (
+            "<td style='text-align:right;font-weight:600;color:" + (GREEN if v >= 0 else RED) + ";'>" + "{:+.2f}R".format(v) + "</td>")
+    body, cut = "", None
+    for s in splits:
+        if s["cut"] != cut:
+            cut = s["cut"]
+            body += ("<tr><td colspan='6' style='color:" + MUTED + ";font-size:11px;text-transform:uppercase;letter-spacing:1px;"
+                     "padding-top:12px;'>" + ("By sector type" if cut == "Sector type" else "By SPX trend on the day the setup fired") + "</td></tr>")
+        few = s["n"] < 4
+        txt = MUTED if few else TEXT
+        body += ("<tr style='color:" + txt + ";'><td>" + ("Longs" if s["side"] == "Long" else "Shorts") + ", " + s["label"] + "</td>"
+                 "<td style='text-align:right;'>" + str(s["n"]) + ("<span style='color:" + MUTED + ";font-size:10px;'> few</span>" if few else "") + "</td>"
+                 "<td style='text-align:right;'>" + str(s["stopped"]) + "</td><td style='text-align:right;'>" + str(s["t1"]) + "</td>"
+                 + r_cell(s["avg_r"]) + r_cell(s["net_r"] if s["n"] else None) + "</tr>")
+    return ("<div style='font-size:11.5px;text-transform:uppercase;letter-spacing:1px;color:" + MUTED + ";margin:16px 0 4px 2px;'>"
+            "Where it works</div><table class='ns-tbl'><tr><th style='text-align:left;'>Trades</th><th style='text-align:right;'>Entered</th>"
+            "<th style='text-align:right;'>Stopped out</th><th style='text-align:right;'>Reached T1</th>"
+            "<th style='text-align:right;'>Avg R</th><th style='text-align:right;'>Net R</th></tr>" + body + "</table>"
+            "<p style='color:" + MUTED + ";font-size:11.5px;margin:6px 2px 0 2px;'>The same trades as the tiles above, cut two ways, so each "
+            "cut adds back to the total. Defensive means " + ", ".join(sorted(DEFENSIVE_SECTORS)) + "; everything else is cyclical. "
+            "Trend is whether SPX closed above its 50-day average on the day the setup fired. Greyed rows have fewer than four trades. "
+            "Treat this as a question to keep watching, not an answer.</p>")
 
 def book_match(rec, book, window_days=7):
     """Did the real Swing Book open this ticker within a week after the screener raised it?"""
@@ -2283,6 +2349,9 @@ elif page_selection == "Swing Book":
                 st.markdown("<div class='ns-panel' style='border-left:3px solid " + BLUE + ";'><span style='font-size:13.5px;"
                             "color:#cdd8e4;'>" + " ".join(notes) + "</span></div>", unsafe_allow_html=True)
 
+            if n_ent:
+                st.markdown(shadow_splits_html(shadow_splits(sh_trades)), unsafe_allow_html=True)
+
             shown = [x_ for x_ in sh_trades if x_["status"] in ("Pending", "Open", "Closed")]
             shown.sort(key=lambda x_: (0 if x_["status"] in ("Pending", "Open") else 1, -pd.Timestamp(x_["signal_date"]).toordinal()))
             body_h = ""
@@ -3500,7 +3569,7 @@ elif page_selection == "Swing Screener":
             rows_v = ""
             for r in valid_rows[:15]:
                 note, ncol = _entry_note(r)
-                rr_txt = "{:.1f}".format(r["rr_now"]) if r["rr_now"] is not None else "-"
+                rr_txt = "{:.1f}".format(r["rr_now"]) if (r["rr_now"] is not None and r["rr_now"] >= 0) else "-"   # past T1: nothing left to measure
                 rows_v += ("<tr><td style='font-weight:700;'>" + r["t"] + _held_chip(r["t"]) + "</td>"
                            "<td style='color:" + MUTED + ";'>" + r["sec"] + "</td>"
                            "<td style='color:" + MUTED + ";'>" + r["fired"].strftime("%a %b %d") + "</td>"
@@ -3522,6 +3591,8 @@ elif page_selection == "Swing Screener":
                         "<th style='text-align:right;'>R:R from here</th><th style='text-align:left;'>New entry</th>"
                         "<th style='text-align:left;'>Left today's list because</th>"
                         "</tr>" + rows_v + "</table>", unsafe_allow_html=True)
+            if len(valid_rows) > 15:
+                st.caption("Showing 15 of " + str(len(valid_rows)) + " setups that are still valid.")
         else:
             st.info("No earlier setup is still valid: every one has either been stopped out, reached T1, or is on today's list.")
 
@@ -3546,6 +3617,8 @@ elif page_selection == "Swing Screener":
                         "<th style='text-align:right;'>Stop</th><th style='text-align:right;'>T1</th>"
                         "<th style='text-align:left;'>Outcome</th><th style='text-align:right;'>Last close</th>"
                         "<th style='text-align:right;'>Now</th></tr>" + rows_r + "</table>", unsafe_allow_html=True)
+            if len(resolved_rows) > 12:
+                st.caption("Showing the 12 most recent of " + str(len(resolved_rows)) + " resolved setups.")
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
                 "A screen is a starting point, not a trade list. Check earnings dates before entering anything. "
