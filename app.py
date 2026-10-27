@@ -636,7 +636,7 @@ def screen_setup(t, df, want_long, P, spx_3m, why=None):
 SHADOW_START = pd.Timestamp("2026-09-25")   # the first screener run: signals from this close onward are tracked
 # Streamlit's cache notices edits to the cached function but not to shadow_replay, which it calls. Raise this number
 # whenever shadow_replay starts recording something new, so a deploy shows it at once and not up to an hour later.
-SHADOW_CACHE_VERSION = 3
+SHADOW_CACHE_VERSION = 4
 SHADOW_PLAN = (0.50, 0.25)                  # share sold at T1 and at T2; the rest goes at the stop or the last target
 # The labelled backtest: the same replay run further back, ending the day before the live shadow book starts,
 # so the two never overlap. Each choice is the first close a setup may fire on.
@@ -809,6 +809,19 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
         j = int(sidx.searchsorted(date, side="right")) - 1
         return None if j < 49 else bool(s_close[j] > (csum[j + 1] - csum[j - 49]) / 50.0)
 
+    s_e8 = pd.Series(s_close).ewm(span=8, adjust=False).mean().values
+    s_e21 = pd.Series(s_close).ewm(span=21, adjust=False).mean().values
+
+    def spx_regime_at(date):
+        """Chris's short-term read of SPX at that close: below the 21 EMA is Bearish, below the 8 EMA only is a
+        Bearish lean, otherwise Bullish. None without 21 sessions of history."""
+        j = int(sidx.searchsorted(date, side="right")) - 1
+        if j < 20:
+            return None
+        if s_close[j] < s_e21[j]:
+            return "bear"
+        return "lean" if s_close[j] < s_e8[j] else "bull"
+
     w, tol, trades = int(P["pullback_win"]), 1e-9, []
     for t, df in data.items():
         prep = _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter, end)
@@ -832,7 +845,7 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
             rec = dict(t=t, sec=res["sec"], side="Long" if is_long else "Short", signal_date=ix[i].date(),
                        signal_px=res["px"], stop=res["stop"], tg=list(res["tg"]), rr_signal=res["rr"],
                        open_lo=res["open_lo"], open_hi=res["open_hi"], last=float(cv[-1]),
-                       spx_up=spx_above50_at(ix[i]))
+                       spx_up=spx_above50_at(ix[i]), spx_reg=spx_regime_at(ix[i]))
             if i == n - 1:
                 trades.append(dict(rec, status="Pending"))
                 continue
@@ -980,6 +993,11 @@ def shadow_splits(trades):
             sub = [x for x in ent if x["side"] == side and x.get("spx_up") is key]
             if sub or key is not None:
                 out.append(dict(cut="SPX trend", side=side, label=label, **stats(sub)))
+    for side in ("Long", "Short"):
+        for key, label in (("bull", "SPX above its 8 EMA (bullish)"), ("lean", "SPX below its 8 EMA only (bearish lean)"),
+                           ("bear", "SPX below its 21 EMA (bearish)")):
+            out.append(dict(cut="SPX regime", side=side, label=label,
+                            **stats([x for x in ent if x["side"] == side and x.get("spx_reg") == key])))
     return out
 
 def shadow_splits_html(splits):
@@ -992,7 +1010,8 @@ def shadow_splits_html(splits):
         if s["cut"] != cut:
             cut = s["cut"]
             body += ("<tr><td colspan='6' style='color:" + MUTED + ";font-size:11px;text-transform:uppercase;letter-spacing:1px;"
-                     "padding-top:12px;'>" + ("By sector type" if cut == "Sector type" else "By SPX trend on the day the setup fired") + "</td></tr>")
+                     "padding-top:12px;'>" + {"Sector type": "By sector type", "SPX trend": "By SPX trend (50-day) on the day the setup fired",
+                       "SPX regime": "By SPX short-term regime (8 / 21 EMA) on the day the setup fired"}[cut] + "</td></tr>")
         few = s["n"] < 4
         txt = MUTED if few else TEXT
         body += ("<tr style='color:" + txt + ";'><td>" + ("Longs" if s["side"] == "Long" else "Shorts") + ", " + s["label"] + "</td>"
@@ -1005,7 +1024,8 @@ def shadow_splits_html(splits):
             "<th style='text-align:right;'>Avg R</th><th style='text-align:right;'>Net R</th></tr>" + body + "</table>"
             "<p style='color:" + MUTED + ";font-size:11.5px;margin:6px 2px 0 2px;'>The same trades as the tiles above, cut two ways, so each "
             "cut adds back to the total. Defensive means " + ", ".join(sorted(DEFENSIVE_SECTORS)) + "; everything else is cyclical. "
-            "Trend is whether SPX closed above its 50-day average on the day the setup fired. Greyed rows have fewer than four trades. "
+            "Trend is whether SPX closed above its 50-day average on the day the setup fired; regime is where SPX closed against "
+            "its 8 and 21 EMAs that day (below the 21 is bearish, below the 8 only is a bearish lean). Greyed rows have fewer than four trades. "
             "Treat this as a question to keep watching, not an answer.</p>")
 
 def book_match(rec, book, window_days=7):
@@ -2428,7 +2448,7 @@ elif page_selection == "Swing Book":
         st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 10px 2px;'>"
                     "The shadow book's exact rules replayed further back, ending " + (SHADOW_START - pd.Timedelta(days=1)).strftime("%b %d, %Y")
                     + ", the day before the live record starts. The point is to see trades the live book has not met yet, "
-                      "above all <strong>shorts while SPX is below its 50-day</strong>. Nothing here is added to the live "
+                      "above all <strong>shorts while SPX is below its 8 and 21 EMAs</strong>. Nothing here is added to the live "
                       "figures above.</p>", unsafe_allow_html=True)
 
         bt_c1, bt_c2 = st.columns([3, 1])
@@ -2508,21 +2528,36 @@ elif page_selection == "Swing Book":
                 tl += tile("Reached T1", "%d of %d" % (B["reached_t1"], b_ent), "of trades entered")
                 st.markdown("<div class='ns-row'>" + tl + "</div>", unsafe_allow_html=True)
 
-                # the question this backtest exists for: shorts by SPX trend, next to longs for comparison
+                # the question this backtest exists for: shorts by SPX regime (8 / 21 EMA), next to longs for comparison
                 b_ent_list = [x_ for x_ in bt_trades if x_["status"] in ("Open", "Closed")]
-                def _cell(side, up):
-                    sub = [x_ for x_ in b_ent_list if x_["side"] == side and x_.get("spx_up") is up]
+                def _cell(side, reg):
+                    sub = [x_ for x_ in b_ent_list if x_["side"] == side and x_.get("spx_reg") == reg]
                     rs_ = [x_["r_mult"] for x_ in sub if x_.get("r_mult") is not None]
                     avg = sum(rs_) / len(rs_) if rs_ else None
                     stp = sum(1 for x_ in sub if x_["status"] == "Closed" and x_["hits"] == 0)
                     sub_txt = ("%d trades, %d stopped out, net %s" % (len(sub), stp, _br(sum(rs_), 1))) if sub else "no trades"
                     return avg, sub_txt
                 tl2 = ""
-                for side, up, lab in (("Short", False, "Shorts, SPX below 50-day"), ("Short", True, "Shorts, SPX above 50-day"),
-                                      ("Long", True, "Longs, SPX above 50-day"), ("Long", False, "Longs, SPX below 50-day")):
-                    avg, sub_txt = _cell(side, up)
+                for side, reg, lab in (("Short", "bear", "Shorts, SPX bearish (below 21)"), ("Short", "lean", "Shorts, SPX bearish lean"),
+                                       ("Short", "bull", "Shorts, SPX bullish (above 8)"), ("Long", "bull", "Longs, SPX bullish (above 8)")):
+                    avg, sub_txt = _cell(side, reg)
                     tl2 += tile(lab, _br(avg), sub_txt, _bcol(avg))
                 st.markdown("<div class='ns-row' style='margin-top:8px;'>" + tl2 + "</div>", unsafe_allow_html=True)
+
+                # what-ifs on the same trades: drop shorts, or keep only the shorts your regime read would allow
+                def _net(sub):
+                    rs_ = [x_["r_mult"] for x_ in sub if x_.get("r_mult") is not None]
+                    return (sum(rs_), (sum(rs_) / len(rs_) if rs_ else None), len(sub))
+                longs_ = [x_ for x_ in b_ent_list if x_["side"] == "Long"]
+                tl3 = ""
+                for lab, sub in (("As tested, longs and all shorts", b_ent_list),
+                                 ("Longs only", longs_),
+                                 ("Longs + shorts only when bearish", longs_ + [x_ for x_ in b_ent_list if x_["side"] == "Short" and x_.get("spx_reg") == "bear"]),
+                                 ("Longs + shorts on lean or bearish", longs_ + [x_ for x_ in b_ent_list if x_["side"] == "Short" and x_.get("spx_reg") in ("bear", "lean")])):
+                    tot, avg, n_ = _net(sub)
+                    tl3 += tile(lab, _br(tot, 1), "%d trades, avg %s" % (n_, _br(avg)), _bcol(tot))
+                st.markdown("<div style='font-size:11.5px;text-transform:uppercase;letter-spacing:1px;color:" + MUTED + ";margin:16px 0 4px 2px;'>"
+                            "What if: net R on the same trades</div><div class='ns-row'>" + tl3 + "</div>", unsafe_allow_html=True)
 
                 st.markdown(shadow_splits_html(shadow_splits(bt_trades)), unsafe_allow_html=True)
 
@@ -2536,7 +2571,7 @@ elif page_selection == "Swing Book":
                             continue
                         rs_ = [x_["r_mult"] for x_ in sub if x_.get("r_mult") is not None]
                         avg = sum(rs_) / len(rs_) if rs_ else None
-                        below = sum(1 for x_ in sub if x_.get("spx_up") is False)
+                        below = sum(1 for x_ in sub if x_.get("spx_reg") == "bear")
                         yb += ("<tr><td>" + str(y_) + "</td><td style='color:" + (GREEN if side == "Long" else RED) + ";'>" + side + "s</td>"
                                "<td style='text-align:right;'>" + str(len(sub)) + "</td><td style='text-align:right;'>" + str(below) + "</td>"
                                "<td style='text-align:right;'>" + str(sum(1 for x_ in sub if x_["hits"] >= 1)) + "</td>"
@@ -2545,12 +2580,12 @@ elif page_selection == "Swing Book":
                                + _br(sum(rs_) if rs_ else None, 1) + "</td></tr>")
                 st.markdown("<div style='font-size:11.5px;text-transform:uppercase;letter-spacing:1px;color:" + MUTED + ";margin:16px 0 4px 2px;'>"
                             "Year by year</div><table class='ns-tbl'><tr><th style='text-align:left;'>Year</th><th style='text-align:left;'>Side</th>"
-                            "<th style='text-align:right;'>Entered</th><th style='text-align:right;'>SPX below 50-day</th>"
+                            "<th style='text-align:right;'>Entered</th><th style='text-align:right;'>SPX bearish (below 21)</th>"
                             "<th style='text-align:right;'>Reached T1</th><th style='text-align:right;'>Avg R</th>"
                             "<th style='text-align:right;'>Net R</th></tr>" + yb + "</table>", unsafe_allow_html=True)
 
-                # the short trades taken while SPX was below its 50-day, newest first
-                sb = sorted([x_ for x_ in b_ent_list if x_["side"] == "Short" and x_.get("spx_up") is False],
+                # the short trades taken while SPX was bearish (below its 21 EMA), newest first
+                sb = sorted([x_ for x_ in b_ent_list if x_["side"] == "Short" and x_.get("spx_reg") == "bear"],
                             key=lambda x_: x_["signal_date"], reverse=True)
                 if sb:
                     rows = ""
@@ -2565,7 +2600,7 @@ elif page_selection == "Swing Book":
                                  "<td style='text-align:right;color:" + (GREEN if x_["result"] >= 0 else RED) + ";font-weight:600;'>" + _bsg(x_["result"]) + "%</td>"
                                  "<td style='text-align:right;color:" + MUTED + ";'>" + (_br(x_["r_mult"]) if x_.get("r_mult") is not None else "-") + "</td></tr>")
                     st.markdown("<div style='font-size:11.5px;text-transform:uppercase;letter-spacing:1px;color:" + MUTED + ";margin:16px 0 4px 2px;'>"
-                                "Shorts taken while SPX was below its 50-day</div><table class='shx'><tr><th>Signal</th><th>Ticker</th><th>Sector</th>"
+                                "Shorts taken while SPX was bearish (below its 21 EMA)</div><table class='shx'><tr><th>Signal</th><th>Ticker</th><th>Sector</th>"
                                 "<th style='text-align:right;'>Entry</th><th>Outcome</th><th>Exit</th><th style='text-align:right;'>Result</th>"
                                 "<th style='text-align:right;'>R</th></tr>" + rows + "</table>"
                                 + ("<p style='color:" + MUTED + ";font-size:12px;margin:6px 2px 0 2px;'>Showing the 40 most recent of %d.</p>" % len(sb)
