@@ -636,8 +636,12 @@ def screen_setup(t, df, want_long, P, spx_3m, why=None):
 SHADOW_START = pd.Timestamp("2026-09-25")   # the first screener run: signals from this close onward are tracked
 # Streamlit's cache notices edits to the cached function but not to shadow_replay, which it calls. Raise this number
 # whenever shadow_replay starts recording something new, so a deploy shows it at once and not up to an hour later.
-SHADOW_CACHE_VERSION = 4
+SHADOW_CACHE_VERSION = 5
 SHADOW_PLAN = (0.50, 0.25)                  # share sold at T1 and at T2; the rest goes at the stop or the last target
+# The screener went long-only on this date, after the backtest showed its short setup losing in every year since 2022.
+# The live shadow book keeps the shorts raised before it as a record and tracks longs only from it. The backtest still
+# measures both sides, so the short rules stay in the code.
+SHORTS_OFF = pd.Timestamp("2026-10-27")
 # The labelled backtest: the same replay run further back, ending the day before the live shadow book starts,
 # so the two never overlap. Each choice is the first close a setup may fire on.
 BACKTEST_STARTS = {
@@ -766,7 +770,8 @@ def _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter=True, end=None
         t1_ok = lambda i, is_long: True
     return dict(df=df, ix=ix, n=n, ov=ov, hv=hv, lv=lv, cv=cv, long_ok=long_ok, short_ok=short_ok, t1_ok=t1_ok)
 
-def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_hist=160, prefilter=True, end_date=None):
+def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_hist=160, prefilter=True, end_date=None,
+                  shorts_before=None):
     """Replay the swing screener over history and manage every setup it would have raised.
 
     For each close from `start_date`, the shared rules are run on exactly the data that existed then
@@ -781,9 +786,11 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
     to prove it changes nothing.
     `end_date`, when given, is the last close a setup may fire on (the backtest stops the day before the live
     book starts); trades opened by then are still managed through the latest bar.
+    `shorts_before`, when given, stops short setups from that close on (the screener is long-only from SHORTS_OFF).
     """
     start = pd.Timestamp(start_date).normalize()
     end = None if end_date is None else pd.Timestamp(end_date).normalize()
+    no_short = None if shorts_before is None else pd.Timestamp(shorts_before).normalize()
     sx = spx[["Open", "Close"]].dropna()
     sidx = pd.DatetimeIndex(sx.index)
     if sidx.tz is not None:
@@ -835,6 +842,8 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
                 continue                                   # still in the last trade on this name
             res, is_long = None, None
             for want_long, ok in ((True, long_ok), (False, short_ok)):
+                if not want_long and no_short is not None and ix[i] >= no_short:
+                    continue                               # long-only from SHORTS_OFF
                 if ok[i] and t1_ok(i, want_long):
                     res = screen_setup(t, df.iloc[: i + 1], want_long, P, spx_3m_at(ix[i]))
                     if res is not None:
@@ -2295,7 +2304,8 @@ elif page_selection == "Swing Book":
                     + ";'>&nbsp;operator only, not shown to readers</span></div>", unsafe_allow_html=True)
         st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                     "Every setup the Swing Screener has raised since " + SHADOW_START.strftime("%b %d")
-                    + ", tracked whether or not you took it. A setup is entered at the <strong>next open</strong>, but only "
+                    + ", tracked whether or not you took it. The screener is <strong>long-only from "
+                    + SHORTS_OFF.strftime("%b %d") + "</strong>; shorts raised before then stay here as a record. A setup is entered at the <strong>next open</strong>, but only "
                       "if that open is still inside its Valid open range; otherwise it is recorded as skipped. It is then "
                       "managed by the same stop, breakeven-after-T1 and 50 / 25 / 25 rules as the book above, with the "
                       "screener's public rule set (not any settings tried on the Screener page). Positions are unlimited "
@@ -2321,7 +2331,7 @@ elif page_selection == "Swing Book":
             sx_ = fetch_history("^SPX", period="2y", interval="1d")
             if sx_ is None or len(sx_) < 70:
                 return None
-            return shadow_replay(data, sx_, SCREEN_DEFAULTS, SHADOW_START)
+            return shadow_replay(data, sx_, SCREEN_DEFAULTS, SHADOW_START, shorts_before=SHORTS_OFF)
 
         sh_err = None
         try:
@@ -3440,7 +3450,9 @@ elif page_selection == "Swing Screener":
     if operator:
         c1, c2, c3 = st.columns(3)
         with c1:
-            direction = st.radio("Setups", ["Long", "Short"], horizontal=True)
+            direction = st.radio("Setups", ["Long", "Short"], horizontal=True,
+                                 help="The screener is long-only. Short is kept for research: its setup lost money in "
+                                      "every year of the backtest since 2022, so the public view and the Shadow Book ignore it.")
         with c2:
             min_rr = st.number_input("Minimum R:R to T1", 1.0, 5.0, 2.0, 0.25)
             max_ext = st.number_input("Max distance from 21MA (%)", 2.0, 20.0, 6.0, 0.5)
