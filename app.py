@@ -475,8 +475,8 @@ SCREEN_DEFAULTS = dict(min_dv=20.0, max_ext=6.0, pullback_win=5, req_rs=True,
                        min_stop_atr=0.75, min_rr=2.0, max_atr=15.0, pos_cap=15.0)
 
 @st.cache_data(ttl=3600, show_spinner="Scanning the universe...")
-def get_universe_ohlc(tickers, end_str):
-    start = (pd.Timestamp(end_str) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
+def get_universe_ohlc(tickers, end_str, days=420):
+    start = (pd.Timestamp(end_str) - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
     out = {}
     tl = list(tickers)
     for i in range(0, len(tl), 120):
@@ -636,8 +636,15 @@ def screen_setup(t, df, want_long, P, spx_3m, why=None):
 SHADOW_START = pd.Timestamp("2026-09-25")   # the first screener run: signals from this close onward are tracked
 # Streamlit's cache notices edits to the cached function but not to shadow_replay, which it calls. Raise this number
 # whenever shadow_replay starts recording something new, so a deploy shows it at once and not up to an hour later.
-SHADOW_CACHE_VERSION = 2
+SHADOW_CACHE_VERSION = 3
 SHADOW_PLAN = (0.50, 0.25)                  # share sold at T1 and at T2; the rest goes at the stop or the last target
+# The labelled backtest: the same replay run further back, ending the day before the live shadow book starts,
+# so the two never overlap. Each choice is the first close a setup may fire on.
+BACKTEST_STARTS = {
+    "Since Jan 2022 (includes the 2022 bear market)": "2022-01-03",
+    "Since Jan 2023": "2023-01-03",
+    "Since Jan 2025 (includes the spring 2025 selloff)": "2025-01-02",
+}
 
 def walk_trade(o, h, l, c, k, is_long, entry, stop, tg, plan=SHADOW_PLAN):
     """Manage one trade bar by bar from its entry bar `k`, exactly as the swing rules say.
@@ -681,7 +688,7 @@ def trade_result(entry, is_long, legs, last=None, remaining=0.0):
         tot += remaining * ret(last)
     return tot
 
-def _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter=True):
+def _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter=True, end=None):
     """Per-name arrays and the cheap daily checks that rule most days out before the full rules run.
 
     Every condition here is necessary for the shared rules to pass, so skipping the days it rejects can never
@@ -702,6 +709,8 @@ def _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter=True):
     ov, hv, lv = df["Open"].values.astype(float), df["High"].values.astype(float), df["Low"].values.astype(float)
     ar = np.arange(n)
     live = (ar >= min_hist) & (ix >= start)
+    if end is not None:                 # a backtest stops raising signals here; its trades still run to today
+        live &= ix <= end
     if prefilter:
         dvs = ((cs * df["Volume"]).rolling(20).mean() / 1e6).values
         ext = (cv / ev - 1.0) * 100.0
@@ -757,7 +766,7 @@ def _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter=True):
         t1_ok = lambda i, is_long: True
     return dict(df=df, ix=ix, n=n, ov=ov, hv=hv, lv=lv, cv=cv, long_ok=long_ok, short_ok=short_ok, t1_ok=t1_ok)
 
-def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_hist=160, prefilter=True):
+def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_hist=160, prefilter=True, end_date=None):
     """Replay the swing screener over history and manage every setup it would have raised.
 
     For each close from `start_date`, the shared rules are run on exactly the data that existed then
@@ -770,8 +779,11 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
     `prefilter` runs the shared rules only on days where cheap necessary conditions hold (trend, extension,
     pullback window, volume, relative strength, stop distance, a pivot target far enough away); turning it off runs them everywhere and exists
     to prove it changes nothing.
+    `end_date`, when given, is the last close a setup may fire on (the backtest stops the day before the live
+    book starts); trades opened by then are still managed through the latest bar.
     """
     start = pd.Timestamp(start_date).normalize()
+    end = None if end_date is None else pd.Timestamp(end_date).normalize()
     sx = spx[["Open", "Close"]].dropna()
     sidx = pd.DatetimeIndex(sx.index)
     if sidx.tz is not None:
@@ -799,7 +811,7 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
 
     w, tol, trades = int(P["pullback_win"]), 1e-9, []
     for t, df in data.items():
-        prep = _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter)
+        prep = _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter, end)
         if prep is None:
             continue
         df, ix, n, ov, hv, lv, cv = prep["df"], prep["ix"], prep["n"], prep["ov"], prep["hv"], prep["lv"], prep["cv"]
@@ -2405,6 +2417,167 @@ elif page_selection == "Swing Book":
                           "take weeks; the all-trades figures count open trades at their last close. "
                           "<strong>YOURS</strong> marks a name your book opened within a week of the signal. "
                           "Vs owning SPX is the trade's result minus the index over the same days.</p>", unsafe_allow_html=True)
+
+        # ---- Shadow backtest (operator only, clearly labelled) ----
+        # The same replay and rules as the shadow book above, run over older history and stopped the day before the
+        # live book starts, so it never mixes with the live record. It only runs when asked: years of history for the
+        # whole universe take a while to download.
+        st.markdown("<div class='ns-section' style='margin-top:30px;'>🧪 Shadow Backtest "
+                    "<span style='font-size:12px; font-weight:400; text-transform:none; letter-spacing:0; color:" + AMBER
+                    + ";'>&nbsp;BACKTEST, not live results</span></div>", unsafe_allow_html=True)
+        st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 10px 2px;'>"
+                    "The shadow book's exact rules replayed further back, ending " + (SHADOW_START - pd.Timedelta(days=1)).strftime("%b %d, %Y")
+                    + ", the day before the live record starts. The point is to see trades the live book has not met yet, "
+                      "above all <strong>shorts while SPX is below its 50-day</strong>. Nothing here is added to the live "
+                      "figures above.</p>", unsafe_allow_html=True)
+
+        bt_c1, bt_c2 = st.columns([3, 1])
+        with bt_c1:
+            bt_label = st.selectbox("Backtest period", list(BACKTEST_STARTS.keys()), key="bt_period")
+        with bt_c2:
+            st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+            if st.button("Run backtest", key="bt_run", use_container_width=True):
+                st.session_state["bt_ran"] = bt_label
+
+        @st.cache_data(ttl=6 * 3600, show_spinner="Downloading years of history and replaying the screener (a minute or two)...")
+        def get_backtest_trades(start_iso, end_str, today_iso, live, code_version):
+            start_ts = pd.Timestamp(start_iso)
+            # enough calendar days before the first signal for the 160-session lookback the live screener has
+            days = int((pd.Timestamp(end_str) - start_ts).days) + 420
+            data = get_universe_ohlc(tuple(UNIVERSE), end_str, days)
+            if not data:
+                return None
+            if live:
+                data = {t_: (d_.iloc[:-1] if len(d_) and d_.index[-1].date().isoformat() == today_iso else d_)
+                        for t_, d_ in data.items()}
+            sx_ = fetch_history("^SPX", start=(start_ts - pd.Timedelta(days=420)).strftime("%Y-%m-%d"),
+                                end=end_str, interval="1d")
+            if sx_ is None or len(sx_) < 70:
+                return None
+            return shadow_replay(data, sx_, SCREEN_DEFAULTS, start_ts, end_date=SHADOW_START - pd.Timedelta(days=1))
+
+        bt_choice = st.session_state.get("bt_ran")
+        if bt_choice not in BACKTEST_STARTS:
+            st.markdown("<p style='color:" + MUTED + "; font-size:13px; margin:2px;'>Pick a period and press "
+                        "<strong>Run backtest</strong>. The first run takes a minute or two; after that it is kept for six hours.</p>",
+                        unsafe_allow_html=True)
+        else:
+            bt_err = None
+            try:
+                bt_trades = get_backtest_trades(BACKTEST_STARTS[bt_choice], _end_str, _today.isoformat(), _live,
+                                                SHADOW_CACHE_VERSION)
+            except Exception as e_:
+                bt_trades, bt_err = None, e_
+            if bt_trades is None:
+                if bt_err is not None:
+                    st.warning("The backtest could not be built: %s: %s" % (type(bt_err).__name__, str(bt_err)[:160]))
+                else:
+                    st.info("Price history could not be loaded right now. Try again in a minute.")
+            elif not [x_ for x_ in bt_trades if x_["status"] in ("Open", "Closed")]:
+                st.info("The rules raised no enterable setups in that period.")
+            else:
+                def _bsg(v, d=1):
+                    return ("{:+." + str(d) + "f}").format(v)
+                def _br(v, d=2):
+                    return "n/a" if v is None else (_bsg(v, d) + "R")
+                def _bcol(v):
+                    return MUTED if v is None else (GREEN if v > 0 else RED)
+
+                bt_from = pd.Timestamp(BACKTEST_STARTS[bt_choice]).strftime("%b %d, %Y")
+                bt_to = (SHADOW_START - pd.Timedelta(days=1)).strftime("%b %d, %Y")
+                st.markdown("<div class='ns-panel' style='border-left:3px solid " + AMBER + ";'><span style='font-size:13.5px;color:#cdd8e4;'>"
+                            "<strong style='color:" + AMBER + ";'>BACKTEST.</strong> Setups raised " + bt_from + " to " + bt_to
+                            + ", managed with the live rules. Hypothetical results on today's universe; see the notes below.</span></div>",
+                            unsafe_allow_html=True)
+                st.markdown("<style>.ns-tbl{width:100%;border-collapse:collapse;background:#151b26;border:1px solid #232c3d;"
+                            "font-size:14px;font-family:'IBM Plex Mono',monospace;}.ns-tbl th{font-family:'IBM Plex Sans',sans-serif;"
+                            "font-size:11.5px;text-transform:uppercase;letter-spacing:0.8px;color:#a8b6c6;padding:11px 14px;"
+                            "border-bottom:1px solid #232c3d;font-weight:600;}.ns-tbl td{padding:10px 14px;border-bottom:1px solid #1c2434;"
+                            "color:#e6edf3;}.shx{width:100%;border-collapse:collapse;background:#151b26;border:1px solid #232c3d;"
+                            "font-size:13.5px;font-family:'IBM Plex Mono',monospace;margin-top:10px;}.shx th{font-family:'IBM Plex Sans',sans-serif;"
+                            "font-size:11.5px;text-transform:uppercase;letter-spacing:0.8px;color:#a8b6c6;padding:10px 12px;"
+                            "border-bottom:1px solid #232c3d;font-weight:600;text-align:left;}.shx td{padding:9px 12px;"
+                            "border-bottom:1px solid #1c2434;color:#e6edf3;vertical-align:top;}</style>", unsafe_allow_html=True)
+                B = shadow_summary(bt_trades)
+                b_ent = B["entered"]
+                tl = tile("Entered", str(b_ent), "%d closed, %d open" % (B["closed"], B["open"]))
+                tl += tile("Average R, all trades", _br(B["avg_r_all"]), "open trades marked to the last close", _bcol(B["avg_r_all"]))
+                tl += tile("Net R, all trades", _br(B["total_r_all"], 1), "sum over every entered trade", _bcol(B["total_r_all"]))
+                tl += tile("Closed, won", ("%d of %d" % (B["wins"], B["closed"])) if B["closed"] else "none",
+                           ("%.0f%% win rate" % B["win_rate"]) if B["win_rate"] is not None else "", MUTED)
+                tl += tile("Reached T1", "%d of %d" % (B["reached_t1"], b_ent), "of trades entered")
+                st.markdown("<div class='ns-row'>" + tl + "</div>", unsafe_allow_html=True)
+
+                # the question this backtest exists for: shorts by SPX trend, next to longs for comparison
+                b_ent_list = [x_ for x_ in bt_trades if x_["status"] in ("Open", "Closed")]
+                def _cell(side, up):
+                    sub = [x_ for x_ in b_ent_list if x_["side"] == side and x_.get("spx_up") is up]
+                    rs_ = [x_["r_mult"] for x_ in sub if x_.get("r_mult") is not None]
+                    avg = sum(rs_) / len(rs_) if rs_ else None
+                    stp = sum(1 for x_ in sub if x_["status"] == "Closed" and x_["hits"] == 0)
+                    sub_txt = ("%d trades, %d stopped out, net %s" % (len(sub), stp, _br(sum(rs_), 1))) if sub else "no trades"
+                    return avg, sub_txt
+                tl2 = ""
+                for side, up, lab in (("Short", False, "Shorts, SPX below 50-day"), ("Short", True, "Shorts, SPX above 50-day"),
+                                      ("Long", True, "Longs, SPX above 50-day"), ("Long", False, "Longs, SPX below 50-day")):
+                    avg, sub_txt = _cell(side, up)
+                    tl2 += tile(lab, _br(avg), sub_txt, _bcol(avg))
+                st.markdown("<div class='ns-row' style='margin-top:8px;'>" + tl2 + "</div>", unsafe_allow_html=True)
+
+                st.markdown(shadow_splits_html(shadow_splits(bt_trades)), unsafe_allow_html=True)
+
+                # by calendar year of the signal, so one good or bad stretch cannot hide inside the total
+                yrs = sorted({x_["signal_date"].year for x_ in b_ent_list})
+                yb = ""
+                for y_ in yrs:
+                    for side in ("Long", "Short"):
+                        sub = [x_ for x_ in b_ent_list if x_["signal_date"].year == y_ and x_["side"] == side]
+                        if not sub:
+                            continue
+                        rs_ = [x_["r_mult"] for x_ in sub if x_.get("r_mult") is not None]
+                        avg = sum(rs_) / len(rs_) if rs_ else None
+                        below = sum(1 for x_ in sub if x_.get("spx_up") is False)
+                        yb += ("<tr><td>" + str(y_) + "</td><td style='color:" + (GREEN if side == "Long" else RED) + ";'>" + side + "s</td>"
+                               "<td style='text-align:right;'>" + str(len(sub)) + "</td><td style='text-align:right;'>" + str(below) + "</td>"
+                               "<td style='text-align:right;'>" + str(sum(1 for x_ in sub if x_["hits"] >= 1)) + "</td>"
+                               "<td style='text-align:right;font-weight:600;color:" + _bcol(avg) + ";'>" + _br(avg) + "</td>"
+                               "<td style='text-align:right;font-weight:600;color:" + _bcol(sum(rs_) if rs_ else None) + ";'>"
+                               + _br(sum(rs_) if rs_ else None, 1) + "</td></tr>")
+                st.markdown("<div style='font-size:11.5px;text-transform:uppercase;letter-spacing:1px;color:" + MUTED + ";margin:16px 0 4px 2px;'>"
+                            "Year by year</div><table class='ns-tbl'><tr><th style='text-align:left;'>Year</th><th style='text-align:left;'>Side</th>"
+                            "<th style='text-align:right;'>Entered</th><th style='text-align:right;'>SPX below 50-day</th>"
+                            "<th style='text-align:right;'>Reached T1</th><th style='text-align:right;'>Avg R</th>"
+                            "<th style='text-align:right;'>Net R</th></tr>" + yb + "</table>", unsafe_allow_html=True)
+
+                # the short trades taken while SPX was below its 50-day, newest first
+                sb = sorted([x_ for x_ in b_ent_list if x_["side"] == "Short" and x_.get("spx_up") is False],
+                            key=lambda x_: x_["signal_date"], reverse=True)
+                if sb:
+                    rows = ""
+                    for x_ in sb[:40]:
+                        how = x_["how"]
+                        o_col = RED if how == "Stopped out" else (AMBER if how.startswith("Breakeven") else (GREEN if x_["hits"] >= 1 else TEXT))
+                        rows += ("<tr><td style='color:" + MUTED + ";'>" + x_["signal_date"].strftime("%b %d, %Y") + "</td>"
+                                 "<td style='font-weight:700;'>" + x_["t"] + "</td><td style='color:" + MUTED + ";'>" + x_["sec"] + "</td>"
+                                 "<td style='text-align:right;'>" + "{:,.2f}".format(x_["entry"]) + "</td>"
+                                 "<td style='color:" + o_col + ";font-weight:600;'>" + how + "</td>"
+                                 "<td>" + (x_["exit_date"].strftime("%b %d, %Y") if x_["exit_date"] else "open") + "</td>"
+                                 "<td style='text-align:right;color:" + (GREEN if x_["result"] >= 0 else RED) + ";font-weight:600;'>" + _bsg(x_["result"]) + "%</td>"
+                                 "<td style='text-align:right;color:" + MUTED + ";'>" + (_br(x_["r_mult"]) if x_.get("r_mult") is not None else "-") + "</td></tr>")
+                    st.markdown("<div style='font-size:11.5px;text-transform:uppercase;letter-spacing:1px;color:" + MUTED + ";margin:16px 0 4px 2px;'>"
+                                "Shorts taken while SPX was below its 50-day</div><table class='shx'><tr><th>Signal</th><th>Ticker</th><th>Sector</th>"
+                                "<th style='text-align:right;'>Entry</th><th>Outcome</th><th>Exit</th><th style='text-align:right;'>Result</th>"
+                                "<th style='text-align:right;'>R</th></tr>" + rows + "</table>"
+                                + ("<p style='color:" + MUTED + ";font-size:12px;margin:6px 2px 0 2px;'>Showing the 40 most recent of %d.</p>" % len(sb)
+                                   if len(sb) > 40 else ""), unsafe_allow_html=True)
+
+                st.markdown("<p style='color:" + MUTED + "; font-size:12.5px; margin:10px 2px 0 2px;'>"
+                            "<strong>Read this as a backtest, not a track record.</strong> It runs on today's universe list, so names "
+                            "that fell out of the large-cap list (or were not public yet) are handled as if you knew the list in "
+                            "advance, which flatters longs in particular. Sector labels are today's. Prices are adjusted for "
+                            "splits and dividends, fills are at the open with no commissions or slippage, positions are unlimited "
+                            "and each trade stands alone. Trades raised before " + SHADOW_START.strftime("%b %d") + " that are still "
+                            "running are marked to the last close.</p>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11px; text-align:center; margin-top:18px;'>"
                 "This is not trading advice. This is purely for information/education. Positions reflect the author's own tracking portfolio.</p>", unsafe_allow_html=True)
