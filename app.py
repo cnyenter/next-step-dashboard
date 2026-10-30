@@ -2634,6 +2634,13 @@ elif page_selection == "Swing Book":
 elif page_selection == "Weekly Recap":
 
     st.title("Next Step Trading: The Tape Report")
+    # Research sections (session blocks, full sector and mover boards, shorts, does-strength-carry) are operator only:
+    # readers get the map, the proof and the longs that can still set up.
+    try:
+        _code = st.secrets.get("SCREENER_PASSCODE", None)
+    except Exception:
+        _code = None
+    operator = bool(_code) and (st.sidebar.text_input("Operator passcode", type="password", key="scr_pass") == _code)
     _title_ph = st.empty()   # product name is appended once the selection is known
 
     # Sector ETFs and the movers watchlist are fixed, so this page needs no weekly upkeep.
@@ -2808,6 +2815,7 @@ elif page_selection == "Weekly Recap":
     setups = []
     has_dates = (not lv.empty) and ("_dt" in lv.columns) and lv["_dt"].notna().any()
     n_rows_all = 0
+    graded_rows = []
 
     if not lv.empty:
         raw = []
@@ -2958,6 +2966,7 @@ elif page_selection == "Weekly Recap":
             tiles += tile("Setups Fired", str(len(setups)),
                           "look below / above and fail", AMBER)
     st.markdown("<div class='ns-row'>" + tiles + "</div>", unsafe_allow_html=True)
+    map_ph = st.container()     # "The map for next week" is filled in below, once the levels and time at price are known
     st.divider()
 
     if card_html or lv.empty:
@@ -3044,52 +3053,165 @@ elif page_selection == "Weekly Recap":
                 + "%;background:linear-gradient(90deg,#2b6f6a,#26a69a);'></div>" + tag + "</div></div>")
     st.markdown("<div class='ns-panel'>" + tap + "</div>", unsafe_allow_html=True)
 
-    # ---------- 3. When the money moved ----------
-    st.markdown("<div class='ns-section'>🕐 When The Money Moved</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Net points by session block: where the week's trend actually got made.</p>", unsafe_allow_html=True)
-    blocks = [("Open → 11a", 9, 11), ("Midday", 11, 14), ("2p → Close", 14, 16)]
-    if A["futures"]:
-        blocks = [("Overnight", 4, 9)] + blocks   # Globex into the RTH open
-    days = list(daily.index)
-    hm = "<div style='display:grid;grid-template-columns:118px repeat(" + str(len(days)) + ",1fr);gap:6px;'>"
-    hm += "<div></div>"
-    for d in days:
-        _live = session_open and d.date() == today_date
-        hm += ("<div style='font-size:12.5px;text-transform:uppercase;letter-spacing:0.7px;color:"
-               + (AMBER if _live else MUTED)
-               + ";text-align:center;font-weight:600;'>" + d.strftime("%a")
-               + (" &bull; LIVE" if _live else "") + "</div>")
-    cell_vals = {}
-    for bname, h0, h1 in blocks:
-        for d in days:
-            seg = bars[(bars.index.date == d.date()) & (bars.index.hour >= h0) & (bars.index.hour < h1)]
-            cell_vals[(bname, d)] = (float(seg["Close"].iloc[-1] - seg["Open"].iloc[0]) if len(seg) else None)
-    mx = max([abs(v) for v in cell_vals.values() if v is not None] or [1.0])
-    for bname, _, _ in blocks:
-        hm += ("<div style='font-size:13.5px;color:" + MUTED + ";display:flex;align-items:center;justify-content:flex-end;"
-               "padding-right:10px;'>" + bname + "</div>")
-        for d in days:
-            v = cell_vals[(bname, d)]
-            if v is None:
-                bgc, fgc, txt = "#141a24", "#3d4757", "-"
+    # ---------- The map for next week (rendered at the top, under the tiles) ----------
+    # Three forward-looking lines built from what the week already showed: the 8 / 21 EMA regime, the published
+    # levels nearest the close with what happened to them, and the week's most-traded price.
+    @st.cache_data(ttl=1800)
+    def get_daily_closes(ticker, end_str):
+        h = fetch_history(ticker, period="1y", interval="1d")
+        if h is None or not len(h):
+            return None
+        c = h["Close"].dropna()
+        ix_ = pd.DatetimeIndex(c.index)
+        if ix_.tz is not None:
+            ix_ = ix_.tz_localize(None)
+        c.index = ix_.normalize()
+        return c[c.index < pd.Timestamp(end_str)]
+
+    def _px(v):
+        return "{:.0f}".format(v)       # whole numbers, no commas, as in the levels posts
+
+    def _zone(b, t):
+        return _px(b) if abs(t - b) < 1.0 else _px(b) + " to " + _px(t)
+
+    map_rows = []
+    # 1. regime
+    try:
+        dc = get_daily_closes(A["yf"], e_str)
+        if dc is not None and session_open and len(dc) and dc.index[-1].date() == today_date:
+            dc = dc.iloc[:-1]           # today's bar is unfinished: read the regime off the last settled close
+    except Exception:
+        dc = None
+    if dc is not None and len(dc) >= 30:
+        c_, e8_ = float(dc.iloc[-1]), float(dc.ewm(span=8, adjust=False).mean().iloc[-1])
+        e21_ = float(dc.ewm(span=21, adjust=False).mean().iloc[-1])
+        if c_ < e21_:
+            reg, reg_col, reg_txt = "Bearish", RED, "closed below its 21 EMA"
+        elif c_ < e8_:
+            reg, reg_col, reg_txt = "Bearish lean", AMBER, "closed below its 8 EMA but above the 21"
+        else:
+            reg, reg_col, reg_txt = "Bullish", GREEN, "closed above its 8 EMA"
+        map_rows.append(("Regime", "<strong style='color:" + reg_col + ";'>" + reg + "</strong>: " + A["label"] + " " + reg_txt
+                         + " (" + _px(c_) + "; 8 EMA " + _px(e8_) + ", 21 EMA " + _px(e21_) + ")."))
+    # 2. levels nearest the close, with what this week did to them
+    if graded_rows:
+        day_names = [d.strftime("%a") for d in daily.index]
+        near = []
+        for r in graded_rows:
+            last = None
+            for k_, cell in enumerate(r["cells"]):
+                if isinstance(cell, tuple) and cell[0] in ("hold", "break", "both"):
+                    last = (cell, day_names[k_])
+            if r["b"] <= wk_close <= r["t"]:
+                side_, dist = "inside", 0.0
+            elif r["b"] > wk_close:
+                side_, dist = "above", r["b"] - wk_close
             else:
-                inten = min(0.62, 0.10 + abs(v) / mx * 0.52)
-                bgc = ("rgba(38,166,154,%.2f)" % inten) if v >= 0 else ("rgba(239,83,80,%.2f)" % inten)
-                fgc = GREEN if v >= 0 else RED
-                txt = "{:+.0f}".format(v)
-            hm += ("<div style='height:44px;border-radius:6px;display:flex;align-items:center;justify-content:center;"
-                   "background:" + bgc + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:15px;font-weight:600;'>"
-                   + txt + "</div>")
-    hm += "</div>"
-    st.markdown("<div class='ns-panel'>" + hm + "</div>", unsafe_allow_html=True)
+                side_, dist = "below", wk_close - r["t"]
+            if last is None:
+                note = "not tested this week"
+            else:
+                (g_, eff_, _f), dn = last
+                if g_ == "break":
+                    note = ("support that broke " + dn) if eff_ else ("resistance that broke " + dn)
+                elif g_ == "both":
+                    note = ("look below and fail " + dn) if eff_ else ("look above and fail " + dn)
+                else:
+                    note = ("held " + dn) if eff_ else ("rejected price " + dn)
+            near.append(dict(side=side_, dist=dist, txt="<strong>" + _zone(r["b"], r["t"]) + "</strong>"
+                             + (" (" + r["lbl"] + ")" if r["lbl"] else "") + ", " + note))
+        over = sorted([x for x in near if x["side"] == "above"], key=lambda x: x["dist"])[:2]
+        under = sorted([x for x in near if x["side"] == "below"], key=lambda x: x["dist"])[:2]
+        inside = [x for x in near if x["side"] == "inside"][:1]
+        parts = []
+        if inside:
+            parts.append("Price closed inside " + inside[0]["txt"] + ".")
+        if over:
+            parts.append("Overhead, now resistance: " + "; ".join(x["txt"] for x in over) + ".")
+        if under:
+            parts.append("Underneath, now support: " + "; ".join(x["txt"] for x in under) + ".")
+        if parts:
+            map_rows.append(("Levels", " ".join(parts) + " <span style='color:" + MUTED + ";'>From this week's published "
+                             "levels; the next levels post updates them.</span>"))
+    # 3. the week's most-traded price
+    if not counts.empty:
+        poc = float(counts.idxmax() * bucket)
+        gap = wk_close - poc
+        if abs(gap) <= bucket:
+            mag = ("Price closed at the week's most-traded price, <strong>" + _px(poc) + "</strong>: the market is in "
+                   "balance there, so expect rotation around it until one side gives.")
+        elif gap < 0:
+            mag = ("The week's most-traded price, <strong>" + _px(poc) + "</strong>, is " + _px(-gap) + " points above the "
+                   "close: the level buyers have to win back, and a magnet if they do.")
+        else:
+            mag = ("The week's most-traded price, <strong>" + _px(poc) + "</strong>, is " + _px(gap) + " points below the "
+                   "close: the first place to look for support on a pullback.")
+        map_rows.append(("Where it was fought", mag))
+    if map_rows:
+        rows_m = "".join("<div style='display:flex;gap:14px;padding:9px 0;border-top:" + ("none" if i_ == 0 else "1px solid #1c2434")
+                         + ";'><div style='flex:none;width:150px;font-size:11.5px;text-transform:uppercase;letter-spacing:0.8px;"
+                         "color:" + MUTED + ";font-weight:600;padding-top:3px;'>" + k_ + "</div><div style='font-size:14.5px;"
+                         "color:" + TEXT + ";line-height:1.5;'>" + v_ + "</div></div>" for i_, (k_, v_) in enumerate(map_rows))
+        with map_ph:
+            st.markdown("<div class='ns-section' style='margin-top:16px;'>🧭 "
+                        + ("The Map For Next Week" if week_complete else "The Map From Here")
+                        + "</div><div class='ns-panel' style='border-left:3px solid " + BLUE + ";'>" + rows_m + "</div>"
+                        + ("" if week_complete else "<p style='color:" + MUTED + ";font-size:12.5px;margin:2px 2px 0 2px;'>"
+                           "The week is still in progress, so this map moves with it.</p>"), unsafe_allow_html=True)
+
+    # ---------- 3. When the money moved ----------
+    if operator:
+        st.markdown("<div class='ns-section'>🕐 When The Money Moved</div>", unsafe_allow_html=True)
+        st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                    "Net points by session block: where the week's trend actually got made.</p>", unsafe_allow_html=True)
+        blocks = [("Open → 11a", 9, 11), ("Midday", 11, 14), ("2p → Close", 14, 16)]
+        if A["futures"]:
+            blocks = [("Overnight", 4, 9)] + blocks   # Globex into the RTH open
+        days = list(daily.index)
+        hm = "<div style='display:grid;grid-template-columns:118px repeat(" + str(len(days)) + ",1fr);gap:6px;'>"
+        hm += "<div></div>"
+        for d in days:
+            _live = session_open and d.date() == today_date
+            hm += ("<div style='font-size:12.5px;text-transform:uppercase;letter-spacing:0.7px;color:"
+                   + (AMBER if _live else MUTED)
+                   + ";text-align:center;font-weight:600;'>" + d.strftime("%a")
+                   + (" &bull; LIVE" if _live else "") + "</div>")
+        cell_vals = {}
+        for bname, h0, h1 in blocks:
+            for d in days:
+                seg = bars[(bars.index.date == d.date()) & (bars.index.hour >= h0) & (bars.index.hour < h1)]
+                cell_vals[(bname, d)] = (float(seg["Close"].iloc[-1] - seg["Open"].iloc[0]) if len(seg) else None)
+        mx = max([abs(v) for v in cell_vals.values() if v is not None] or [1.0])
+        for bname, _, _ in blocks:
+            hm += ("<div style='font-size:13.5px;color:" + MUTED + ";display:flex;align-items:center;justify-content:flex-end;"
+                   "padding-right:10px;'>" + bname + "</div>")
+            for d in days:
+                v = cell_vals[(bname, d)]
+                if v is None:
+                    bgc, fgc, txt = "#141a24", "#3d4757", "-"
+                else:
+                    inten = min(0.62, 0.10 + abs(v) / mx * 0.52)
+                    bgc = ("rgba(38,166,154,%.2f)" % inten) if v >= 0 else ("rgba(239,83,80,%.2f)" % inten)
+                    fgc = GREEN if v >= 0 else RED
+                    txt = "{:+.0f}".format(v)
+                hm += ("<div style='height:44px;border-radius:6px;display:flex;align-items:center;justify-content:center;"
+                       "background:" + bgc + ";color:" + fgc + ";font-family:IBM Plex Mono,monospace;font-size:15px;font-weight:600;'>"
+                       + txt + "</div>")
+        hm += "</div>"
+        st.markdown("<div class='ns-panel'>" + hm + "</div>", unsafe_allow_html=True)
 
     # ---------- 4. Sector rotation ----------
-    st.markdown("<div class='ns-section'>🔄 Sector Rotation</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Move from Monday\u2019s open to the latest print for the selected week.</p>", unsafe_allow_html=True)
     sec_chg = get_week_change(list(SECTORS.keys()), s_str, e_str)
-    if sec_chg:
+    if sec_chg and not operator:      # readers get one line: the full board is on every broker's site
+        _srt = sorted(sec_chg.items(), key=lambda kv: -kv[1])
+        _fmt = lambda kv: SECTORS.get(kv[0], kv[0]) + " <span style='color:" + (GREEN if kv[1] >= 0 else RED) + ";'>" + "{:+.1f}%".format(kv[1]) + "</span>"
+        st.markdown("<div class='ns-panel' style='font-size:14px;'>🔄 <strong>Sectors:</strong> strongest "
+                    + ", ".join(_fmt(kv) for kv in _srt[:2]) + "; weakest " + ", ".join(_fmt(kv) for kv in _srt[::-1][:2])
+                    + ".</div>", unsafe_allow_html=True)
+    if sec_chg and operator:
+        st.markdown("<div class='ns-section'>🔄 Sector Rotation</div>", unsafe_allow_html=True)
+        st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                    "Move from Monday\u2019s open to the latest print for the selected week.</p>", unsafe_allow_html=True)
         smax = max([abs(v) for v in sec_chg.values()] or [1.0])
         rows = sorted(sec_chg.items(), key=lambda kv: -kv[1])
         srow = ""
@@ -3110,9 +3232,10 @@ elif page_selection == "Weekly Recap":
         st.markdown("<div class='ns-panel'>" + srow + "</div>", unsafe_allow_html=True)
 
     # ---------- 5. Leaders and laggards ----------
-    st.markdown("<div class='ns-section'>🏆 Biggest Movers On The Week</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Ranked by size of move, Monday\u2019s open to the latest print. The board reshuffles as the week goes on.</p>", unsafe_allow_html=True)
+    if operator:        # readers meet the leaders in the watchlist below, where they come with an entry level
+        st.markdown("<div class='ns-section'>🏆 Biggest Movers On The Week</div>", unsafe_allow_html=True)
+        st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                    "Ranked by size of move, Monday\u2019s open to the latest print. The board reshuffles as the week goes on.</p>", unsafe_allow_html=True)
     mv = get_week_change(WATCHLIST, s_str, e_str)
 
     # One download of daily bars feeds both the trend chips on this board and the watchlist below,
@@ -3207,11 +3330,12 @@ elif page_selection == "Weekly Recap":
                       + (GREEN if v >= 0 else RED) + ";'>" + "{:+.1f}%".format(v) + "</span></div>")
             return h + "</div>"
 
-        mc1, mc2 = st.columns(2)
-        with mc1:
-            st.markdown(mover_panel("Leaders", leaders, GREEN), unsafe_allow_html=True)
-        with mc2:
-            st.markdown(mover_panel("Laggards", laggards, RED), unsafe_allow_html=True)
+        if operator:
+            mc1, mc2 = st.columns(2)
+            with mc1:
+                st.markdown(mover_panel("Leaders", leaders, GREEN), unsafe_allow_html=True)
+            with mc2:
+                st.markdown(mover_panel("Laggards", laggards, RED), unsafe_allow_html=True)
 
     # ---------- 6. Pullback watchlist ----------
     @st.cache_data(ttl=1800)
@@ -3228,8 +3352,8 @@ elif page_selection == "Weekly Recap":
     st.markdown("<div class='ns-section'>🎯 Pullback Watchlist</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                 "A strong stock runs away from its 21MA and a weak one runs away from its own, so the week's biggest "
-                "movers are rarely at an entry. Each one here has the price that would put it in range: a pullback to the "
-                "21MA for a long, a bounce to it for a short, or the 50MA when the trend itself is missing. Set a price "
+                "movers are rarely at an entry. Each of the week's leaders here has the price that would put it in range: a pullback to the "
+                "21MA, or the 50MA when the trend itself is missing. Only names that can still meet the screener's 2:1 reward to risk are listed. Set a price "
                 "alert at that level. When it is reached and the stock closes back through it, the Swing Screener page "
                 "tests it against the full rules (relative strength, reward to risk, stop distance), so a level here is a "
                 "place to look, not a signal, and earnings dates are still yours to check. <strong>From here</strong> is the move needed to reach the level. "
@@ -3267,6 +3391,16 @@ elif page_selection == "Weekly Recap":
             out.sort(key=lambda r: (0 if r[2]["state"] == "now" else (3 if r[2]["state"] in ("notrend", "notstacked") else 1),
                                     abs(r[2]["away"])))
             return out
+
+        def _can_qualify(s_):
+            """Could this name still pass the screener's 2:1 rule from its trigger? Same test as the amber note below."""
+            if s_["state"] in ("notrend", "notstacked"):
+                return False
+            if s_["t1"] is None:
+                return True             # blue sky: targets come from extensions, so 2:1 is still possible
+            entry_ = s_["px"] if s_["trigger"] is None else s_["trigger"]
+            room_atr = abs(s_["t1"] - entry_) / s_["atr"] if s_.get("atr") else None
+            return room_atr is None or room_atr >= SCREEN_DEFAULTS["min_rr"] * SCREEN_DEFAULTS["min_stop_atr"]
 
         def _wl_table(title, rows, is_long):
             if not rows:
@@ -3330,87 +3464,97 @@ elif page_selection == "Weekly Recap":
                     "padding:10px 12px;border-bottom:1px solid #232c3d;font-weight:600;text-align:left;}"
                     ".wl td{padding:9px 12px;border-bottom:1px solid #1c2434;color:#e6edf3;vertical-align:top;}</style>",
                     unsafe_allow_html=True)
-        st.markdown(_wl_table("Longs to watch (the leaders above)", _wl_rows(leaders, True), True)
-                    + _wl_table("Shorts to watch (the laggards above)", _wl_rows(laggards, False), False),
-                    unsafe_allow_html=True)
+        if operator:            # everything, including the shorts the screener no longer takes
+            st.markdown(_wl_table("Longs to watch (the leaders above)", _wl_rows(leaders, True), True)
+                        + _wl_table("Shorts to watch (research only: the screener is long-only)", _wl_rows(laggards, False), False),
+                        unsafe_allow_html=True)
+        else:
+            _ok_rows = [r_ for r_ in _wl_rows(leaders, True) if _can_qualify(r_[2])]
+            if _ok_rows:
+                st.markdown(_wl_table("Longs to watch (this week's leaders)", _ok_rows, True), unsafe_allow_html=True)
+            else:
+                st.markdown("<div class='ns-panel' style='font-size:14px;color:#cdd8e4;'>None of this week's leaders can set up "
+                            "at 2:1 from their entry level right now: their nearest targets are too close. The Swing Screener "
+                            "will flag any that do.</div>", unsafe_allow_html=True)
 
     # ---------- 7. Does strength carry? ----------
-    ROLL_WEEKS = 12
-    st.markdown("<div class='ns-section' style='margin-top:22px;'>🔁 Does Strength Carry?</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Each of the last " + str(ROLL_WEEKS) + " weeks, the six biggest gainers and losers on the watchlist were "
-                "ranked, then followed through the <em>next</em> week and compared with SPX. One week proves nothing; "
-                "a dozen at once is a lean. It answers a practical question: right now, does it pay to buy strength, "
-                "or to wait for the pullback?</p>", unsafe_allow_html=True)
-    rf = None
-    try:
-        _spx = get_spx_daily(_wstart)
-        if wo and _spx is not None:
-            rf = rolling_followthrough({t_: _settled(d_) for t_, d_ in wo.items()}, _settled(_spx),
-                                       n_pairs=ROLL_WEEKS, top=6, today=now_et)
-    except Exception:
+    if operator:
+        ROLL_WEEKS = 12
+        st.markdown("<div class='ns-section' style='margin-top:22px;'>🔁 Does Strength Carry?</div>", unsafe_allow_html=True)
+        st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                    "Each of the last " + str(ROLL_WEEKS) + " weeks, the six biggest gainers and losers on the watchlist were "
+                    "ranked, then followed through the <em>next</em> week and compared with SPX. One week proves nothing; "
+                    "a dozen at once is a lean. It answers a practical question: right now, does it pay to buy strength, "
+                    "or to wait for the pullback?</p>", unsafe_allow_html=True)
         rf = None
+        try:
+            _spx = get_spx_daily(_wstart)
+            if wo and _spx is not None:
+                rf = rolling_followthrough({t_: _settled(d_) for t_, d_ in wo.items()}, _settled(_spx),
+                                           n_pairs=ROLL_WEEKS, top=6, today=now_et)
+        except Exception:
+            rf = None
 
-    if rf is None or rf["n"] < 3:
-        st.info("Not enough weekly history to test this yet.")
-    else:
-        lead_pct = rf["lead_beat"] / rf["names"] * 100.0
-        lag_pct = rf["lag_trail"] / rf["names"] * 100.0
-        tl = tile("Leaders vs SPX", "{:+.1f} pts".format(rf["ex_lead"]), "average over %d weeks, median %+.1f" % (rf["n"], rf["med_lead"]),
-                  GREEN if rf["ex_lead"] >= 0 else RED)
-        tl += tile("Leaders that beat SPX", "%d of %d" % (rf["lead_beat"], rf["names"]), "%.0f%% the following week" % lead_pct,
-                   GREEN if lead_pct >= 50 else RED)
-        tl += tile("Laggards vs SPX", "{:+.1f} pts".format(rf["ex_lag"]), "negative means weakness continued",
-                   RED if rf["ex_lag"] >= 0 else GREEN)
-        tl += tile("Laggards that trailed SPX", "%d of %d" % (rf["lag_trail"], rf["names"]), "%.0f%% the following week" % lag_pct,
-                   GREEN if lag_pct >= 50 else RED)
-        st.markdown("<div class='ns-row'>" + tl + "</div>", unsafe_allow_html=True)
-
-        # Names within a week move together, so the evidence is the weeks, not the 72 names. A verdict needs the
-        # average gap, the typical (median) week and the share of weeks that pointed the same way to all agree.
-        n_w, wl_beat, wg_trail = rf["n"], rf["weeks_lead_beat"], rf["weeks_lag_trail"]
-        if rf["ex_lead"] <= -0.5 and rf["med_lead"] <= -0.3 and wl_beat <= 0.4 * n_w:
-            v_head, v_tail = ("Strength has not carried",
-                              " last week's leaders trailed SPX the following week in %d of %d weeks, so buying last week's strength "
-                              "has not paid. That favors waiting for the pullback over chasing the breakout." % (n_w - wl_beat, n_w))
-        elif rf["ex_lead"] >= 0.5 and rf["med_lead"] >= 0.3 and wl_beat >= 0.6 * n_w:
-            v_head, v_tail = ("Strength has carried",
-                              " last week's leaders beat SPX the following week in %d of %d weeks, so buying last week's strength "
-                              "has paid. That favors buying breakouts over waiting for the pullback." % (wl_beat, n_w))
+        if rf is None or rf["n"] < 3:
+            st.info("Not enough weekly history to test this yet.")
         else:
-            skew = (" (the average of %+.1f is pulled around by a few big weeks)" % rf["ex_lead"]) \
-                if abs(rf["ex_lead"] - rf["med_lead"]) >= 0.3 else ""
-            v_head, v_tail = ("No clear edge from strength",
-                              " last week's leaders beat SPX the following week in %d of %d weeks, and the typical week's gap "
-                              "was %+.1f pts%s." % (wl_beat, n_w, rf["med_lead"], skew))
-        if rf["ex_lag"] <= -0.5 and rf["med_lag"] <= -0.3 and wg_trail >= 0.6 * n_w:
-            v2 = " Weakness has continued: last week's laggards trailed SPX in %d of %d weeks." % (wg_trail, n_w)
-        elif rf["ex_lag"] >= 0.5 and rf["med_lag"] >= 0.3 and wg_trail <= 0.4 * n_w:
-            v2 = " Weakness has not continued: last week's laggards have tended to bounce."
-        else:
-            v2 = " Laggards have shown no clear pattern."
-        st.markdown("<div class='ns-panel' style='border-left:3px solid " + BLUE + ";'><span style='font-size:13.5px;color:#cdd8e4;'>"
-                    "<strong>" + v_head + ":</strong>" + v_tail + v2 + " "
-                    + str(rf["n"]) + " weeks of six names is a small sample: read it as a lean for how to approach the screener "
-                    "this month, not a rule.</span></div>", unsafe_allow_html=True)
+            lead_pct = rf["lead_beat"] / rf["names"] * 100.0
+            lag_pct = rf["lag_trail"] / rf["names"] * 100.0
+            tl = tile("Leaders vs SPX", "{:+.1f} pts".format(rf["ex_lead"]), "average over %d weeks, median %+.1f" % (rf["n"], rf["med_lead"]),
+                      GREEN if rf["ex_lead"] >= 0 else RED)
+            tl += tile("Leaders that beat SPX", "%d of %d" % (rf["lead_beat"], rf["names"]), "%.0f%% the following week" % lead_pct,
+                       GREEN if lead_pct >= 50 else RED)
+            tl += tile("Laggards vs SPX", "{:+.1f} pts".format(rf["ex_lag"]), "negative means weakness continued",
+                       RED if rf["ex_lag"] >= 0 else GREEN)
+            tl += tile("Laggards that trailed SPX", "%d of %d" % (rf["lag_trail"], rf["names"]), "%.0f%% the following week" % lag_pct,
+                       GREEN if lag_pct >= 50 else RED)
+            st.markdown("<div class='ns-row'>" + tl + "</div>", unsafe_allow_html=True)
 
-        rows_h = ""
-        for r in reversed(rf["rows"]):
-            rows_h += ("<tr><td>" + (r["w0"] - pd.Timedelta(days=4)).strftime("%b %d") + " to " + r["w0"].strftime("%b %d")
-                       + "</td><td style='color:" + MUTED + ";'>" + (r["w1"] - pd.Timedelta(days=4)).strftime("%b %d")
-                       + " to " + r["w1"].strftime("%b %d") + "</td>"
-                       "<td style='text-align:right;color:" + (GREEN if r["lead_next"] >= 0 else RED) + ";'>"
-                       + "{:+.1f}%".format(r["lead_next"]) + "</td>"
-                       "<td style='text-align:right;color:" + (GREEN if r["lag_next"] >= 0 else RED) + ";'>"
-                       + "{:+.1f}%".format(r["lag_next"]) + "</td>"
-                       "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(r["idx_next"]) + "</td>"
-                       "<td style='text-align:right;'>" + str(r["lead_beat"]) + " of " + str(r["top"]) + "</td>"
-                       "<td style='text-align:right;'>" + str(r["lag_trail"]) + " of " + str(r["top"]) + "</td></tr>")
-        st.markdown("<table class='wl'><tr><th>Ranked week</th><th>Followed week</th>"
-                    "<th style='text-align:right;'>Leaders</th><th style='text-align:right;'>Laggards</th>"
-                    "<th style='text-align:right;'>SPX</th><th style='text-align:right;'>Leaders beat SPX</th>"
-                    "<th style='text-align:right;'>Laggards trailed SPX</th></tr>" + rows_h + "</table>",
-                    unsafe_allow_html=True)
+            # Names within a week move together, so the evidence is the weeks, not the 72 names. A verdict needs the
+            # average gap, the typical (median) week and the share of weeks that pointed the same way to all agree.
+            n_w, wl_beat, wg_trail = rf["n"], rf["weeks_lead_beat"], rf["weeks_lag_trail"]
+            if rf["ex_lead"] <= -0.5 and rf["med_lead"] <= -0.3 and wl_beat <= 0.4 * n_w:
+                v_head, v_tail = ("Strength has not carried",
+                                  " last week's leaders trailed SPX the following week in %d of %d weeks, so buying last week's strength "
+                                  "has not paid. That favors waiting for the pullback over chasing the breakout." % (n_w - wl_beat, n_w))
+            elif rf["ex_lead"] >= 0.5 and rf["med_lead"] >= 0.3 and wl_beat >= 0.6 * n_w:
+                v_head, v_tail = ("Strength has carried",
+                                  " last week's leaders beat SPX the following week in %d of %d weeks, so buying last week's strength "
+                                  "has paid. That favors buying breakouts over waiting for the pullback." % (wl_beat, n_w))
+            else:
+                skew = (" (the average of %+.1f is pulled around by a few big weeks)" % rf["ex_lead"]) \
+                    if abs(rf["ex_lead"] - rf["med_lead"]) >= 0.3 else ""
+                v_head, v_tail = ("No clear edge from strength",
+                                  " last week's leaders beat SPX the following week in %d of %d weeks, and the typical week's gap "
+                                  "was %+.1f pts%s." % (wl_beat, n_w, rf["med_lead"], skew))
+            if rf["ex_lag"] <= -0.5 and rf["med_lag"] <= -0.3 and wg_trail >= 0.6 * n_w:
+                v2 = " Weakness has continued: last week's laggards trailed SPX in %d of %d weeks." % (wg_trail, n_w)
+            elif rf["ex_lag"] >= 0.5 and rf["med_lag"] >= 0.3 and wg_trail <= 0.4 * n_w:
+                v2 = " Weakness has not continued: last week's laggards have tended to bounce."
+            else:
+                v2 = " Laggards have shown no clear pattern."
+            st.markdown("<div class='ns-panel' style='border-left:3px solid " + BLUE + ";'><span style='font-size:13.5px;color:#cdd8e4;'>"
+                        "<strong>" + v_head + ":</strong>" + v_tail + v2 + " "
+                        + str(rf["n"]) + " weeks of six names is a small sample: read it as a lean for how to approach the screener "
+                        "this month, not a rule.</span></div>", unsafe_allow_html=True)
+
+            rows_h = ""
+            for r in reversed(rf["rows"]):
+                rows_h += ("<tr><td>" + (r["w0"] - pd.Timedelta(days=4)).strftime("%b %d") + " to " + r["w0"].strftime("%b %d")
+                           + "</td><td style='color:" + MUTED + ";'>" + (r["w1"] - pd.Timedelta(days=4)).strftime("%b %d")
+                           + " to " + r["w1"].strftime("%b %d") + "</td>"
+                           "<td style='text-align:right;color:" + (GREEN if r["lead_next"] >= 0 else RED) + ";'>"
+                           + "{:+.1f}%".format(r["lead_next"]) + "</td>"
+                           "<td style='text-align:right;color:" + (GREEN if r["lag_next"] >= 0 else RED) + ";'>"
+                           + "{:+.1f}%".format(r["lag_next"]) + "</td>"
+                           "<td style='text-align:right;color:" + MUTED + ";'>" + "{:+.1f}%".format(r["idx_next"]) + "</td>"
+                           "<td style='text-align:right;'>" + str(r["lead_beat"]) + " of " + str(r["top"]) + "</td>"
+                           "<td style='text-align:right;'>" + str(r["lag_trail"]) + " of " + str(r["top"]) + "</td></tr>")
+            st.markdown("<table class='wl'><tr><th>Ranked week</th><th>Followed week</th>"
+                        "<th style='text-align:right;'>Leaders</th><th style='text-align:right;'>Laggards</th>"
+                        "<th style='text-align:right;'>SPX</th><th style='text-align:right;'>Leaders beat SPX</th>"
+                        "<th style='text-align:right;'>Laggards trailed SPX</th></tr>" + rows_h + "</table>",
+                        unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11.5px; text-align:center; margin-top:16px;'>"
                 "This is not trading advice. This is purely for information/education.</p>", unsafe_allow_html=True)
