@@ -3118,14 +3118,24 @@ elif page_selection == "Weekly Recap":
                     note = ("look below and fail " + dn) if eff_ else ("look above and fail " + dn)
                 else:
                     note = ("held " + dn) if eff_ else ("rejected price " + dn)
-            near.append(dict(side=side_, dist=dist, txt="<strong>" + _zone(r["b"], r["t"]) + "</strong>"
-                             + (" (" + r["lbl"] + ")" if r["lbl"] else "") + ", " + note))
+            near.append(dict(side=side_, dist=dist, key=_zone(r["b"], r["t"]), tested=last is not None,
+                             name="<strong>" + _zone(r["b"], r["t"]) + "</strong>" + (" (" + r["lbl"] + ")" if r["lbl"] else ""),
+                             note=note))
+        # The same price can sit on the card twice (published with and without a label, or on different days).
+        # Name it once, keeping the row that was actually tested.
+        _best = {}
+        for x in near:
+            if x["key"] not in _best or (x["tested"] and not _best[x["key"]]["tested"]):
+                _best[x["key"]] = x
+        near = list(_best.values())
+        for x in near:
+            x["txt"] = x["name"] + ", " + x["note"]
         over = sorted([x for x in near if x["side"] == "above"], key=lambda x: x["dist"])[:2]
         under = sorted([x for x in near if x["side"] == "below"], key=lambda x: x["dist"])[:2]
         inside = [x for x in near if x["side"] == "inside"][:1]
         parts = []
         if inside:
-            parts.append("Price closed inside " + inside[0]["txt"] + ".")
+            parts.append("Price closed inside " + inside[0]["name"] + " (" + inside[0]["note"] + ").")
         if over:
             parts.append("Overhead, now resistance: " + "; ".join(x["txt"] for x in over) + ".")
         if under:
