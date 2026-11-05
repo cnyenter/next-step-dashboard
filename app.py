@@ -3111,6 +3111,11 @@ elif page_selection == "Weekly Recap":
             dc = dc.iloc[:-1]           # today's bar is unfinished: read the regime off the last settled close
     except Exception:
         dc = None
+
+    def _regime(px_, e8v, e21v):
+        if px_ < e21v:
+            return "Bearish", RED
+        return ("Bearish lean", AMBER) if px_ < e8v else ("Bullish", GREEN)
     if dc is not None and len(dc) >= 30:
         c_, e8_ = float(dc.iloc[-1]), float(dc.ewm(span=8, adjust=False).mean().iloc[-1])
         e21_ = float(dc.ewm(span=21, adjust=False).mean().iloc[-1])
@@ -3120,8 +3125,18 @@ elif page_selection == "Weekly Recap":
             reg, reg_col, reg_txt = "Bearish lean", AMBER, "closed below its 8 EMA but above the 21"
         else:
             reg, reg_col, reg_txt = "Bullish", GREEN, "closed above its 8 EMA"
-        map_rows.append(("Regime", "<strong style='color:" + reg_col + ";'>" + reg + "</strong>: " + A["label"] + " " + reg_txt
-                         + " (" + _px(c_) + "; 8 EMA " + _px(e8_) + ", 21 EMA " + _px(e21_) + ")."))
+        _asof = dc.index[-1].strftime("%a")
+        reg_line = ("<strong style='color:" + reg_col + ";'>" + reg + "</strong> at " + _asof + "'s close: " + A["label"] + " "
+                    + reg_txt + " (" + _px(c_) + "; 8 EMA " + _px(e8_) + ", 21 EMA " + _px(e21_) + ").")
+        # While a session is open the regime above is yesterday's. Say where today's price sits against the same averages,
+        # so a big down (or up) day does not hide behind a stale label.
+        if session_open and dc.index[-1].date() < today_date:
+            live_reg, live_col = _regime(wk_close, e8_, e21_)
+            pos = ("below both its 8 and 21 EMA" if wk_close < min(e8_, e21_) else
+                   "above both its 8 and 21 EMA" if wk_close > max(e8_, e21_) else "between its 8 and 21 EMA")
+            reg_line += (" <span style='color:" + live_col + ";'>Today so far " + A["label"] + " is " + _px(wk_close) + ", " + pos
+                         + (": a close here makes it <strong>" + live_reg + "</strong>." if live_reg != reg else ".") + "</span>")
+        map_rows.append(("Regime", reg_line))
     # 2. levels nearest the close, with what this week did to them
     if graded_rows:
         day_names = [d.strftime("%a") for d in daily.index]
@@ -3169,6 +3184,8 @@ elif page_selection == "Weekly Recap":
             parts.append("Overhead, now resistance: " + "; ".join(x["txt"] for x in over) + ".")
         if under:
             parts.append("Underneath, now support: " + "; ".join(x["txt"] for x in under) + ".")
+        elif not inside:
+            parts.append("No published support below the close: price is under every level posted this week.")
         if parts:
             map_rows.append(("Levels", " ".join(parts) + " <span style='color:" + MUTED + ";'>From this week's published "
                              "levels; the next levels post updates them.</span>"))
