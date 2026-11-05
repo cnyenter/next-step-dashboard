@@ -1149,6 +1149,9 @@ st.sidebar.divider()
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=0&single=true&output=csv"
 MQ_ES_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=1464368299&single=true&output=csv"
 MQ_SPX_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=818488226&single=true&output=csv"
+# The Setups tab: Hold and Press setups (and the planned look below / above and fails) read from each day's plan text
+# by the Levels > Import pasted levels script. Same published document as the levels, tab gid 520001.
+SETUPS_SHEET_URL = SHEET_URL.replace("gid=0&", "gid=520001&")
 SWING_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRo0guFofgbGZITI4EGe4aRciVLhlL0zFDmhLLPtxOn1dQ9ErjB3b9PPThlOd7adYmkGv90pv6YiBap/pub?gid=74511324&single=true&output=csv"
 
 # ==========================================
@@ -2710,7 +2713,7 @@ elif page_selection == "Weekly Recap":
 
     @st.cache_data(ttl=900)
     def get_week_bars(ticker, start_str, end_str):
-        h = fetch_history(ticker, start=start_str, end=end_str, interval="15m")
+        h = fetch_history(ticker, start=start_str, end=end_str, interval="5m")
         if h.empty:
             return None
         try:
@@ -2720,7 +2723,7 @@ elif page_selection == "Weekly Recap":
         return trim_spikes(h)
 
     def trim_spikes(h):
-        """Cut back a wick that is a bad print, not trading: longer than ten typical 15-minute bars AND more than
+        """Cut back a wick that is a bad print, not trading: longer than ten typical 5-minute bars AND more than
         1% of price beyond the bar's body. A real news spike rarely clears both; a stray tick (a 160-point ES wick on a
         bar whose body sits 150 points away) does, and it would otherwise fake sweeps of every level in between."""
         if h is None or len(h) < 20:
@@ -2908,7 +2911,8 @@ elif page_selection == "Weekly Recap":
                     if rc is not None:
                         pts = (d_close - rc["price"]) if eff_sup else (rc["price"] - d_close)
                     setups.append(dict(day=d.name, zone=(zb, zt), sup=eff_sup, lbl=lbl, extreme=extreme,
-                                       reclaim=rc, close=d_close, pts=pts, flipped=flipped))
+                                       reclaim=rc, close=d_close, pts=pts, flipped=flipped,
+                                       kind="LBAF" if eff_sup else "LAAF", t1=None, t1_hit=None))
                 if g != "none":
                     any_test = True
                     tested += 1
@@ -2971,11 +2975,75 @@ elif page_selection == "Weekly Recap":
                      "white-space:nowrap;color:" + TEXT + "}"
                      "</style><table class='rc'>" + head + body + "</table>")
 
+    n_rev = len(setups)          # look below / above and fails: these count toward "levels worked"
+
+    # ---- Hold and Press setups from the plan (Setups tab) ----
+    # A hold or press below X is a short: price trades at or above X (the open counts), then a 5-minute bar closes
+    # below X, and that close is the entry. Above X is the mirror image, a long. Points run to the day's close, and
+    # T1 is the plan's first target, hit if price reaches it after the entry bar. A plan line that never triggers is
+    # listed as not triggered, so the plan is graded as well as the tape.
+    try:
+        ps = pd.read_csv(SETUPS_SHEET_URL)
+        ps = ps[ps["Ticker"].astype(str).str.strip() == A["sheet"]].copy()
+        ps["_dt"] = parse_date_col(ps["Date"]).dt.normalize()
+    except Exception:
+        ps = pd.DataFrame()
+    not_triggered = []
+    if not ps.empty:
+        day_of = {d_.name.date(): d_ for _, d_ in daily.iterrows()}
+        for _, pr in ps.iterrows():
+            if pd.isna(pr["_dt"]) or pr["_dt"].date() not in day_of:
+                continue
+            try:
+                X = float(pr["Level"])
+            except Exception:
+                continue
+            kind_ = str(pr["Kind"]).strip().upper()
+            is_long = str(pr["Side"]).strip().lower().startswith("l")
+            dd = day_of[pr["_dt"].date()]
+            dname = dd.name.strftime("%a")
+            live_day = session_open and dd.name.date() == today_date
+            tg_ = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", str(pr.get("Targets", "")))] if pd.notna(pr.get("Targets")) else []
+            if kind_ in ("LBAF", "LAAF"):
+                # planned reversal: did the detector find one at this level that day?
+                if not any(s_["kind"] == kind_ and s_["day"] == dd.name and s_["zone"][0] - 3 <= X <= s_["zone"][1] + 3
+                           for s_ in setups):
+                    not_triggered.append(dname + " " + ("look below and fail of " if kind_ == "LBAF" else "look above and fail of ")
+                                         + "{:.0f}".format(X) + (" (not yet)" if live_day else ""))
+                continue
+            if kind_ not in ("HOLD", "PRESS"):
+                continue
+            day_bars = bars[bars.index.date == dd.name.date()]
+            armed, ent = False, None
+            for j_, (ts_, b_) in enumerate(day_bars.iterrows()):
+                if not armed and ((float(b_["Low"]) <= X) if is_long else (float(b_["High"]) >= X)):
+                    armed = True
+                if armed and ((float(b_["Close"]) > X) if is_long else (float(b_["Close"]) < X)):
+                    ent = (j_, ts_, float(b_["Close"]))
+                    break
+            word = ("Hold " if kind_ == "HOLD" else "Press ") + ("above " if is_long else "below ")
+            if ent is None:
+                why_ = ("not yet" if live_day else
+                        ("price never got back to it" if not armed else "price never closed " + ("above" if is_long else "below") + " it"))
+                not_triggered.append(dname + " " + word.lower() + "{:.0f}".format(X) + " (" + why_ + ")")
+                continue
+            d_close = float(dd["Close"])
+            pts = (d_close - ent[2]) if is_long else (ent[2] - d_close)
+            after = day_bars.iloc[ent[0] + 1:]
+            t1 = tg_[0] if tg_ else None
+            t1_hit = None
+            if t1 is not None:
+                t1_hit = bool(len(after)) and bool((after["High"] >= t1).any() if is_long else (after["Low"] <= t1).any())
+            setups.append(dict(day=dd.name, zone=(X, X), sup=is_long, lbl="", extreme=None,
+                               reclaim=dict(price=ent[2], ts=ent[1]), close=d_close, pts=pts, flipped=False,
+                               kind=("Hold" if kind_ == "HOLD" else "Press"), t1=t1, t1_hit=t1_hit))
+
     # Stacked levels swept by one move are one trade, not four: merge rows that share the day, the side and the
     # reclaim bar (or, with no reclaim, the sweep extreme), listing every level the move ran through.
     _grp = {}
     for s_ in setups:
-        k_ = (s_["day"], s_["sup"], (s_["reclaim"]["ts"] if s_["reclaim"] is not None else ("x", round(s_["extreme"], 2))))
+        k_ = (s_["day"], s_["kind"], s_["sup"],
+              (s_["reclaim"]["ts"] if s_["reclaim"] is not None else ("x", round(s_["extreme"] or 0.0, 2))))
         if k_ in _grp:
             _grp[k_]["levels"].append(s_)
         else:
@@ -2983,13 +3051,13 @@ elif page_selection == "Weekly Recap":
     moves = list(_grp.values())
 
     if tested:
-        worked = held + len(setups)
+        worked = held + n_rev
         tiles += tile("Levels Worked", "%d of %d" % (worked, tested),
                       "held, rejected, or swept and reclaimed",
                       GREEN if worked >= tested * 0.6 else AMBER)
         if setups:
             tiles += tile("Setups Fired", str(len(moves)),
-                          "look below / above and fail", AMBER)
+                          "fails, holds and presses", AMBER)
     st.markdown("<div class='ns-row'>" + tiles + "</div>", unsafe_allow_html=True)
     map_ph = st.container()     # "The map for next week" is filled in below, once the levels and time at price are known
     st.divider()
@@ -2999,7 +3067,12 @@ elif page_selection == "Weekly Recap":
         moves.sort(key=lambda m_: (m_["pts"] is None, -(m_["pts"] or 0.0)))
         rows_html = ""
         for m_ in moves:
-            kind = "Look below and fail" if m_["sup"] else "Look above and fail"
+            kind = {"LBAF": "Look below and fail", "LAAF": "Look above and fail",
+                    "Hold": "Hold " + ("above" if m_["sup"] else "below"),
+                    "Press": "Press " + ("above" if m_["sup"] else "below")}[m_["kind"]]
+            if m_.get("t1") is not None:
+                kind += ("<div style='font-size:11px;font-weight:400;color:" + (GREEN if m_["t1_hit"] else MUTED) + ";'>T1 "
+                         + "{:.0f}".format(m_["t1"]) + (" hit" if m_["t1_hit"] else " not reached") + "</div>")
             names = []
             for s_ in sorted(m_["levels"], key=lambda z: -z["zone"][1]):
                 zb, zt = s_["zone"]
@@ -3013,7 +3086,7 @@ elif page_selection == "Weekly Recap":
             rows_html += ("<tr><td style='color:" + MUTED + ";'>" + m_["day"].strftime("%a") + "</td>"
                           "<td style='font-weight:600;color:" + (GREEN if m_["sup"] else RED) + ";'>" + kind + "</td>"
                           "<td>" + ", ".join(names) + "</td>"
-                          "<td style='text-align:right;color:" + MUTED + ";'>" + "{:.0f}".format(m_["extreme"]) + "</td>"
+                          "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:.0f}".format(m_["extreme"]) if m_["extreme"] is not None else "-") + "</td>"
                           "<td style='text-align:right;'>" + rc_txt + "</td>"
                           "<td style='text-align:right;'>" + "{:.0f}".format(m_["close"]) + "</td>"
                           "<td style='text-align:right;font-weight:700;color:"
@@ -3025,14 +3098,18 @@ elif page_selection == "Weekly Recap":
         st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
                     "<strong style='color:" + TEXT + ";'>" + str(len(moves)) + " setup" + ("" if len(moves) == 1 else "s")
                     + ", " + str(_won) + " closed the day in profit, net " + "{:+.0f}".format(sum(_pp)) + " points.</strong> "
-                    "Entry is the first 15-minute close back through the level after the sweep; points run to the day's close. "
-                    "Levels swept by the same move are one setup.</p>", unsafe_allow_html=True)
+                    "Look below / above and fail: entry is the first 5-minute close back through the level after the sweep. "
+                    "Hold and Press (from the plan): entry is the first 5-minute close through the level. Points run to the day's close; "
+                    "levels taken out by the same move are one setup.</p>", unsafe_allow_html=True)
         st.markdown("<table class='ns-tbl'><tr>"
                     "<th style='text-align:left;'>Day</th><th style='text-align:left;'>Setup</th>"
                     "<th style='text-align:left;'>Level</th><th style='text-align:right;'>Swept to</th>"
                     "<th style='text-align:right;'>Entry</th>"
                     "<th style='text-align:right;'>Close</th><th style='text-align:right;'>Points</th>"
                     "</tr>" + rows_html + "</table>", unsafe_allow_html=True)
+    if not_triggered:
+        st.markdown("<p style='color:" + MUTED + "; font-size:13px; margin:8px 2px 0 2px;'><strong>In the plan, not triggered:</strong> "
+                    + "; ".join(not_triggered) + ".</p>", unsafe_allow_html=True)
 
     if lv.empty:
         st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13.5px;'>"
@@ -3045,7 +3122,7 @@ elif page_selection == "Weekly Recap":
                     "grade yet. Once that week's levels are in the sheet, the card grades them automatically.</div>",
                     unsafe_allow_html=True)
     else:
-        with st.expander("📋 Every published level, graded" + ((": %d of %d worked" % (held + len(setups), tested)) if tested else ""),
+        with st.expander("📋 Every published level, graded" + ((": %d of %d worked" % (held + n_rev, tested)) if tested else ""),
                          expanded=False):
             st.markdown("<p class='ns-sub' style='color:" + MUTED + "; font-size:13.5px; margin:0 0 10px 2px;'>"
                         "<strong style='color:" + AMBER + ";'>LBAF</strong> / <strong style='color:" + AMBER + ";'>LAAF</strong> = "
@@ -3059,7 +3136,7 @@ elif page_selection == "Weekly Recap":
     if operator:
         st.markdown("<div class='ns-section'>📊 Where The Week Was Fought</div>", unsafe_allow_html=True)
         st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                    "Share of 15-minute closes by price bucket: the prices that actually mattered. Builds through the week as bars print.</p>", unsafe_allow_html=True)
+                    "Share of 5-minute closes by price bucket: the prices that actually mattered. Builds through the week as bars print.</p>", unsafe_allow_html=True)
     bucket = max(5, round(wk_range / 12.0 / 5.0) * 5)
     closes = bars["Close"].dropna()
     b_idx = (closes / bucket).round().astype(int)
