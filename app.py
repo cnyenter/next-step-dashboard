@@ -3064,7 +3064,8 @@ elif page_selection == "Weekly Recap":
 
     # ---------- 1. Setups that fired (the proof), then every level graded, folded away ----------
     if moves:
-        moves.sort(key=lambda m_: (m_["pts"] is None, -(m_["pts"] or 0.0)))
+        # oldest first: by day, then by the time the entry filled
+        moves.sort(key=lambda m_: (m_["day"], m_["reclaim"]["ts"] if m_["reclaim"] is not None else m_["day"]))
         rows_html = ""
         for m_ in moves:
             kind = {"LBAF": "Look below and fail", "LAAF": "Look above and fail",
@@ -3080,7 +3081,7 @@ elif page_selection == "Weekly Recap":
                 names.append(nm + (" (" + s_["lbl"] + ")" if s_["lbl"] else "") + ("*" if s_["flipped"] else ""))
             if m_["reclaim"] is not None:
                 rc_txt = ("{:.0f}".format(m_["reclaim"]["price"]) + " <span style='color:" + MUTED + ";font-size:11.5px;'>"
-                          + m_["reclaim"]["ts"].strftime("%H:%M") + "</span>")
+                          + (m_["reclaim"]["ts"] + pd.Timedelta(minutes=5)).strftime("%H:%M") + "</span>")   # the bar's close, when the entry fills
             else:
                 rc_txt = "-"
             rows_html += ("<tr><td style='color:" + MUTED + ";'>" + m_["day"].strftime("%a") + "</td>"
@@ -3091,7 +3092,7 @@ elif page_selection == "Weekly Recap":
                           "<td style='text-align:right;'>" + "{:.0f}".format(m_["close"]) + "</td>"
                           "<td style='text-align:right;font-weight:700;color:"
                           + ((GREEN if m_["pts"] >= 0 else RED) if m_["pts"] is not None else MUTED) + ";'>"
-                          + ("{:+.0f}".format(m_["pts"]) if m_["pts"] is not None else "-") + "</td></tr>")
+                          + (("{:+.0f}".format(m_["pts"]) if abs(m_["pts"]) >= 0.5 else "0") if m_["pts"] is not None else "-") + "</td></tr>")
         _pp = [m_["pts"] for m_ in moves if m_["pts"] is not None]
         _won = sum(1 for v in _pp if v > 0)
         st.markdown("<div class='ns-section' style='margin-top:18px;'>🎯 Setups That Fired</div>", unsafe_allow_html=True)
@@ -3111,7 +3112,9 @@ elif page_selection == "Weekly Recap":
         st.markdown("<p style='color:" + MUTED + "; font-size:13px; margin:8px 2px 0 2px;'><strong>In the plan, not triggered:</strong> "
                     + "; ".join(not_triggered) + ".</p>", unsafe_allow_html=True)
 
-    if lv.empty:
+    if not operator:
+        pass                    # the graded grid and the sheet notices are for the operator only
+    elif lv.empty:
         st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13.5px;'>"
                     "No published levels found for <strong>" + A["sheet"] + "</strong> in the levels sheet. "
                     "Add rows with that ticker and the report card will grade them automatically.</div>",
