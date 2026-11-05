@@ -2717,6 +2717,20 @@ elif page_selection == "Weekly Recap":
             h.index = h.index.tz_convert("US/Eastern")
         except (TypeError, AttributeError):
             pass
+        return trim_spikes(h)
+
+    def trim_spikes(h):
+        """Cut back a wick that is a bad print, not trading: longer than ten typical 15-minute bars AND more than
+        1% of price beyond the bar's body. A real news spike rarely clears both; a stray tick (a 160-point ES wick on a
+        bar whose body sits 150 points away) does, and it would otherwise fake sweeps of every level in between."""
+        if h is None or len(h) < 20:
+            return h
+        h = h.copy()
+        rng_ = (h["High"] - h["Low"]).median()
+        top_, bot_ = h[["Open", "Close"]].max(axis=1), h[["Open", "Close"]].min(axis=1)
+        lim = np.maximum(10.0 * rng_, 0.01 * top_)
+        h["High"] = np.where(h["High"] - top_ > lim, top_, h["High"])
+        h["Low"] = np.where(bot_ - h["Low"] > lim, bot_, h["Low"])
         return h
 
     @st.cache_data(ttl=1800)
@@ -2762,7 +2776,7 @@ elif page_selection == "Weekly Recap":
                   "{:,.0f} low → {:,.0f} high".format(float(daily["Low"].min()), float(daily["High"].max())))
 
     # ---------- 1. Level Report Card (auto-graded) ----------
-    show_untested = st.checkbox("Show levels that were never tested this week", value=False,
+    show_untested = operator and st.checkbox("Show levels that were never tested this week", value=False,
                                 help="Off by default so the card stays readable. Levels price never reached are hidden.")
     def grade_level(published_sup, bottom, top, d_open, d_high, d_low, d_close):
         """Grade one published zone against one session, by the role it actually had.
@@ -2957,81 +2971,95 @@ elif page_selection == "Weekly Recap":
                      "white-space:nowrap;color:" + TEXT + "}"
                      "</style><table class='rc'>" + head + body + "</table>")
 
+    # Stacked levels swept by one move are one trade, not four: merge rows that share the day, the side and the
+    # reclaim bar (or, with no reclaim, the sweep extreme), listing every level the move ran through.
+    _grp = {}
+    for s_ in setups:
+        k_ = (s_["day"], s_["sup"], (s_["reclaim"]["ts"] if s_["reclaim"] is not None else ("x", round(s_["extreme"], 2))))
+        if k_ in _grp:
+            _grp[k_]["levels"].append(s_)
+        else:
+            _grp[k_] = dict(s_, levels=[s_])
+    moves = list(_grp.values())
+
     if tested:
         worked = held + len(setups)
         tiles += tile("Levels Worked", "%d of %d" % (worked, tested),
                       "held, rejected, or swept and reclaimed",
                       GREEN if worked >= tested * 0.6 else AMBER)
         if setups:
-            tiles += tile("Setups Fired", str(len(setups)),
+            tiles += tile("Setups Fired", str(len(moves)),
                           "look below / above and fail", AMBER)
     st.markdown("<div class='ns-row'>" + tiles + "</div>", unsafe_allow_html=True)
     map_ph = st.container()     # "The map for next week" is filled in below, once the levels and time at price are known
     st.divider()
 
-    if card_html or lv.empty:
-        st.markdown("<div class='ns-section'>📋 The Level Report Card</div>", unsafe_allow_html=True)
-    if not card_html:
-        if lv.empty:
-            st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13.5px;'>"
-                        "No published levels found for <strong>" + A["sheet"] + "</strong> in the levels sheet. "
-                        "Add rows with that ticker and the report card will grade them automatically.</div>",
-                        unsafe_allow_html=True)
-        else:
-            st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13.5px;'>"
-                        "No levels were published for <strong>" + A["sheet"] + "</strong> on these sessions, so there is nothing to "
-                        "grade yet. Once that week's levels are in the sheet, the card grades them automatically.</div>",
-                        unsafe_allow_html=True)
-    if card_html:
-        st.markdown("<p class='ns-sub' style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                    "<strong style='color:" + AMBER + ";'>LBAF</strong> = look below and fail, price swept the support and closed back above · "
-                    "<strong style='color:" + AMBER + ";'>LAAF</strong> = look above and fail, price poked the resistance and closed back below · "
-                    "HELD = support held on the test · REJ = resistance turned it away · BRK = closed through · a dash = price never reached it. "
-                    "Graded by the role the level actually had at the open; an asterisk means a gap flipped it from the side it was published on.</p>",
+    # ---------- 1. Setups that fired (the proof), then every level graded, folded away ----------
+    if moves:
+        moves.sort(key=lambda m_: (m_["pts"] is None, -(m_["pts"] or 0.0)))
+        rows_html = ""
+        for m_ in moves:
+            kind = "Look below and fail" if m_["sup"] else "Look above and fail"
+            names = []
+            for s_ in sorted(m_["levels"], key=lambda z: -z["zone"][1]):
+                zb, zt = s_["zone"]
+                nm = ("{:.0f}".format(zb) if abs(zt - zb) < 0.5 else "{:.0f} to {:.0f}".format(zb, zt))
+                names.append(nm + (" (" + s_["lbl"] + ")" if s_["lbl"] else "") + ("*" if s_["flipped"] else ""))
+            if m_["reclaim"] is not None:
+                rc_txt = ("{:.0f}".format(m_["reclaim"]["price"]) + " <span style='color:" + MUTED + ";font-size:11.5px;'>"
+                          + m_["reclaim"]["ts"].strftime("%H:%M") + "</span>")
+            else:
+                rc_txt = "-"
+            rows_html += ("<tr><td style='color:" + MUTED + ";'>" + m_["day"].strftime("%a") + "</td>"
+                          "<td style='font-weight:600;color:" + (GREEN if m_["sup"] else RED) + ";'>" + kind + "</td>"
+                          "<td>" + ", ".join(names) + "</td>"
+                          "<td style='text-align:right;color:" + MUTED + ";'>" + "{:.0f}".format(m_["extreme"]) + "</td>"
+                          "<td style='text-align:right;'>" + rc_txt + "</td>"
+                          "<td style='text-align:right;'>" + "{:.0f}".format(m_["close"]) + "</td>"
+                          "<td style='text-align:right;font-weight:700;color:"
+                          + ((GREEN if m_["pts"] >= 0 else RED) if m_["pts"] is not None else MUTED) + ";'>"
+                          + ("{:+.0f}".format(m_["pts"]) if m_["pts"] is not None else "-") + "</td></tr>")
+        _pp = [m_["pts"] for m_ in moves if m_["pts"] is not None]
+        _won = sum(1 for v in _pp if v > 0)
+        st.markdown("<div class='ns-section' style='margin-top:18px;'>🎯 Setups That Fired</div>", unsafe_allow_html=True)
+        st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                    "<strong style='color:" + TEXT + ";'>" + str(len(moves)) + " setup" + ("" if len(moves) == 1 else "s")
+                    + ", " + str(_won) + " closed the day in profit, net " + "{:+.0f}".format(sum(_pp)) + " points.</strong> "
+                    "Entry is the first 15-minute close back through the level after the sweep; points run to the day's close. "
+                    "Levels swept by the same move are one setup.</p>", unsafe_allow_html=True)
+        st.markdown("<table class='ns-tbl'><tr>"
+                    "<th style='text-align:left;'>Day</th><th style='text-align:left;'>Setup</th>"
+                    "<th style='text-align:left;'>Level</th><th style='text-align:right;'>Swept to</th>"
+                    "<th style='text-align:right;'>Entry</th>"
+                    "<th style='text-align:right;'>Close</th><th style='text-align:right;'>Points</th>"
+                    "</tr>" + rows_html + "</table>", unsafe_allow_html=True)
+
+    if lv.empty:
+        st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13.5px;'>"
+                    "No published levels found for <strong>" + A["sheet"] + "</strong> in the levels sheet. "
+                    "Add rows with that ticker and the report card will grade them automatically.</div>",
                     unsafe_allow_html=True)
-        st.markdown("<div class='ns-panel'>" + card_html + "</div>", unsafe_allow_html=True)
-        if setups:
-            setups.sort(key=lambda s: (s["pts"] is None, -(s["pts"] or 0.0)))
-            rows_html = ""
-            for s in setups:
-                kind = "Look below and fail" if s["sup"] else "Look above and fail"
-                zb, zt = s["zone"]
-                zone_txt = "{:,.0f}".format(zb) if abs(zt - zb) < 0.5 else "{:,.0f} – {:,.0f}".format(zb, zt)
-                if s["lbl"]:
-                    zone_txt += " (" + s["lbl"] + ")"
-                if s["reclaim"] is not None:
-                    rc_txt = ("{:,.0f}".format(s["reclaim"]["price"]) + " <span style='color:" + MUTED + ";font-size:11.5px;'>"
-                              + s["reclaim"]["ts"].strftime("%H:%M") + "</span>")
-                else:
-                    rc_txt = "-"
-                rows_html += ("<tr><td style='color:" + MUTED + ";'>" + s["day"].strftime("%a") + "</td>"
-                              "<td style='font-weight:600;color:" + (GREEN if s["sup"] else RED) + ";'>" + kind + "</td>"
-                              "<td>" + zone_txt + ("*" if s["flipped"] else "") + "</td>"
-                              "<td style='text-align:right;color:" + MUTED + ";'>" + "{:,.0f}".format(s["extreme"]) + "</td>"
-                              "<td style='text-align:right;'>" + rc_txt + "</td>"
-                              "<td style='text-align:right;'>" + "{:,.0f}".format(s["close"]) + "</td>"
-                              "<td style='text-align:right;font-weight:700;color:"
-                              + ((GREEN if s["pts"] >= 0 else RED) if s["pts"] is not None else MUTED) + ";'>"
-                              + ("{:+,.0f}".format(s["pts"]) if s["pts"] is not None else "-") + "</td></tr>")
-            st.markdown("<div class='ns-section' style='margin-top:18px;'>🎯 Setups That Fired</div>",
-                        unsafe_allow_html=True)
-            st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                        "Every look-below-and-fail and look-above-and-fail at a published level this week. "
-                        "<strong>Reclaimed</strong> is the close of the first 15-minute bar back through the level's near edge "
-                        "after the sweep (the bottom of a support zone, the top of a resistance zone), which is where an entry "
-                        "is realistic. <strong>Points</strong> run from that reclaim to the day's close. The sweep extreme is "
-                        "shown only for depth: nobody is filled there.</p>", unsafe_allow_html=True)
-            st.markdown("<table class='ns-tbl'><tr>"
-                        "<th style='text-align:left;'>Day</th><th style='text-align:left;'>Setup</th>"
-                        "<th style='text-align:left;'>Level</th><th style='text-align:right;'>Swept to</th>"
-                        "<th style='text-align:right;'>Reclaimed</th>"
-                        "<th style='text-align:right;'>Close</th><th style='text-align:right;'>Points</th>"
-                        "</tr>" + rows_html + "</table>", unsafe_allow_html=True)
+    elif not card_html:
+        st.markdown("<div style='border:1px dashed #444; border-radius:8px; padding:16px; color:" + MUTED + "; font-size:13.5px;'>"
+                    "No levels were published for <strong>" + A["sheet"] + "</strong> on these sessions, so there is nothing to "
+                    "grade yet. Once that week's levels are in the sheet, the card grades them automatically.</div>",
+                    unsafe_allow_html=True)
+    else:
+        with st.expander("📋 Every published level, graded" + ((": %d of %d worked" % (held + len(setups), tested)) if tested else ""),
+                         expanded=False):
+            st.markdown("<p class='ns-sub' style='color:" + MUTED + "; font-size:13.5px; margin:0 0 10px 2px;'>"
+                        "<strong style='color:" + AMBER + ";'>LBAF</strong> / <strong style='color:" + AMBER + ";'>LAAF</strong> = "
+                        "look below / above and fail · HELD = support held · REJ = resistance turned price away · BRK = closed "
+                        "through · a dash = never reached. Graded by the role the level had at the open; an asterisk means a gap "
+                        "flipped it.</p>", unsafe_allow_html=True)
+            st.markdown("<div class='ns-panel'>" + card_html + "</div>", unsafe_allow_html=True)
 
     # ---------- 2. Where the week was fought (time at price) ----------
-    st.markdown("<div class='ns-section'>📊 Where The Week Was Fought</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "Share of 15-minute closes by price bucket: the prices that actually mattered. Builds through the week as bars print.</p>", unsafe_allow_html=True)
+    # the map uses its most-traded price; the chart itself is operator only
+    if operator:
+        st.markdown("<div class='ns-section'>📊 Where The Week Was Fought</div>", unsafe_allow_html=True)
+        st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
+                    "Share of 15-minute closes by price bucket: the prices that actually mattered. Builds through the week as bars print.</p>", unsafe_allow_html=True)
     bucket = max(5, round(wk_range / 12.0 / 5.0) * 5)
     closes = bars["Close"].dropna()
     b_idx = (closes / bucket).round().astype(int)
@@ -3051,7 +3079,8 @@ elif page_selection == "Weekly Recap":
                 "<div style='flex:1;display:flex;align-items:center;min-width:0;'>"
                 "<div style='height:18px;border-radius:3px;flex:none;width:" + "{:.1f}".format(w)
                 + "%;background:linear-gradient(90deg,#2b6f6a,#26a69a);'></div>" + tag + "</div></div>")
-    st.markdown("<div class='ns-panel'>" + tap + "</div>", unsafe_allow_html=True)
+    if operator:
+        st.markdown("<div class='ns-panel'>" + tap + "</div>", unsafe_allow_html=True)
 
     # ---------- The map for next week (rendered at the top, under the tiles) ----------
     # Three forward-looking lines built from what the week already showed: the 8 / 21 EMA regime, the published
@@ -3212,7 +3241,7 @@ elif page_selection == "Weekly Recap":
 
     # ---------- 4. Sector rotation ----------
     sec_chg = get_week_change(list(SECTORS.keys()), s_str, e_str)
-    if sec_chg and not operator:      # readers get one line: the full board is on every broker's site
+    if False and sec_chg and not operator:      # readers: hidden (not actionable); flip False to show a one-line summary
         _srt = sorted(sec_chg.items(), key=lambda kv: -kv[1])
         _fmt = lambda kv: SECTORS.get(kv[0], kv[0]) + " <span style='color:" + (GREEN if kv[1] >= 0 else RED) + ";'>" + "{:+.1f}%".format(kv[1]) + "</span>"
         st.markdown("<div class='ns-panel' style='font-size:14px;'>🔄 <strong>Sectors:</strong> strongest "
@@ -3361,14 +3390,10 @@ elif page_selection == "Weekly Recap":
 
     st.markdown("<div class='ns-section'>🎯 Pullback Watchlist</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 12px 2px;'>"
-                "A strong stock runs away from its 21MA and a weak one runs away from its own, so the week's biggest "
-                "movers are rarely at an entry. Each of the week's leaders here has the price that would put it in range: a pullback to the "
-                "21MA, or the 50MA when the trend itself is missing. Only names that can still meet the screener's 2:1 reward to risk are listed. Set a price "
-                "alert at that level. When it is reached and the stock closes back through it, the Swing Screener page "
-                "tests it against the full rules (relative strength, reward to risk, stop distance), so a level here is a "
-                "place to look, not a signal, and earnings dates are still yours to check. <strong>From here</strong> is the move needed to reach the level. "
-                "<strong>Room to T1</strong> is the distance from that level to the nearest pivot, the target the screener "
-                "would use. A target marked <strong>too close for 2:1</strong> is under about 1.5 average daily ranges away, so the screener's reward-to-risk rule cannot be met at that level. The 21MA moves every day, so these levels do too.</p>", unsafe_allow_html=True)
+                "This week's leaders that can still set up at the screener's 2:1. Set a price alert at "
+                "<strong>Becomes a candidate at</strong>; when price gets there and closes back through, check the Swing Screener "
+                "page (it runs the full rules) and the earnings date. <strong>From here</strong> is the move needed to get there, "
+                "<strong>Room to T1</strong> the distance from there to the first target. The 21MA moves daily, so these levels do too.</p>", unsafe_allow_html=True)
 
     if not mv or not wo:
         st.info("Price history for the watchlist is not available right now.")
