@@ -1,0 +1,75 @@
+# Next Step Trading: swing alerts to Discord.
+# Runs at 35 minutes past each hour on weekdays, 14:35 to 21:35 UTC. That is 9:35 AM to 4:35 PM Eastern in winter and
+# 10:35 AM to 5:35 PM Eastern in summer, so every hourly bar (and the close) is covered all year. The script itself
+# works out which bars are new, so a late or skipped run does not lose anything.
+# State (open trades, the day's watchlist, the trade and trigger logs) is kept on a separate branch, alert-data,
+# so these saves never redeploy the Streamlit site.
+name: Swing alerts
+
+on:
+  schedule:
+    - cron: "35 14-21 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Send a test message only"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: swing-alerts
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install packages
+        run: pip install --quiet yfinance pandas numpy requests
+
+      - name: Get saved state
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          URL="https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "$URL" alert-data > /dev/null; then
+            git clone --quiet --branch alert-data --single-branch "$URL" alert-data
+          else
+            mkdir alert-data
+            cd alert-data
+            git init --quiet -b alert-data
+            git remote add origin "$URL"
+          fi
+
+      - name: Send a test message
+        if: github.event_name == 'workflow_dispatch' && inputs.test
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.SWING_DISCORD_WEBHOOK }}
+        run: python swing_alerts.py --test
+
+      - name: Check prices and send alerts
+        if: github.event_name == 'schedule' || !inputs.test
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.SWING_DISCORD_WEBHOOK }}
+        run: python swing_alerts.py --data alert-data --app app.py
+
+      - name: Save state
+        if: always()
+        run: |
+          cd alert-data
+          git config user.name "swing-alerts-bot"
+          git config user.email "swing-alerts-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "Nothing new to save"; exit 0; fi
+          git commit --quiet -m "Swing alerts state $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push --quiet origin HEAD:alert-data
