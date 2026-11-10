@@ -1,0 +1,31 @@
+{
+ "trades": [],
+ "day": {
+  "date": "2026-11-10",
+  "watch": {
+   "TSLA": {
+    "ma21": 379.47,
+    "wk": 4.9,
+    "label": "Under the 21MA",
+    "armed": true,
+    "zone_sent": true,
+    "entered": false,
+    "fail_note": null
+   },
+   "LLY": {
+    "ma21": 1320.01,
+    "wk": 3.4,
+    "label": "Extended",
+    "armed": false,
+    "zone_sent": false,
+    "entered": false,
+    "fail_note": null
+   }
+  }
+ },
+ "eod_done": null,
+ "processed": {
+  "LLY": "2026-11-10 14:30:00-05:00",
+  "TSLA": "2026-11-10 14:30:00-05:00"
+ }
+}
