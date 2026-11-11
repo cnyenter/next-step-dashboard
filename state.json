@@ -1,20 +1,20 @@
 {
  "trades": [],
  "day": {
-  "date": "2026-11-10",
+  "date": "2026-11-11",
   "watch": {
    "TSLA": {
-    "ma21": 379.47,
-    "wk": 4.9,
-    "label": "Under the 21MA",
-    "armed": true,
-    "zone_sent": true,
+    "ma21": 379.49,
+    "wk": 5.4,
+    "label": "At the 21MA now",
+    "armed": false,
+    "zone_sent": false,
     "entered": false,
-    "fail_note": "Reward to risk below the minimum"
+    "fail_note": null
    },
    "LLY": {
-    "ma21": 1320.01,
-    "wk": 3.4,
+    "ma21": 1330.22,
+    "wk": 4.9,
     "label": "Extended",
     "armed": false,
     "zone_sent": false,
@@ -23,9 +23,10 @@
    }
   }
  },
- "eod_done": null,
+ "eod_done": "2026-11-11",
  "processed": {
-  "LLY": "2026-11-10 15:30:00-05:00",
-  "TSLA": "2026-11-10 15:30:00-05:00"
- }
+  "LLY": "2026-11-11 15:30:00-05:00",
+  "TSLA": "2026-11-11 15:30:00-05:00"
+ },
+ "pending": []
 }
