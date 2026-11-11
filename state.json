@@ -10,7 +10,7 @@
     "armed": true,
     "zone_sent": true,
     "entered": false,
-    "fail_note": null
+    "fail_note": "Reward to risk below the minimum"
    },
    "LLY": {
     "ma21": 1320.01,
@@ -25,7 +25,7 @@
  },
  "eod_done": null,
  "processed": {
-  "LLY": "2026-11-10 14:30:00-05:00",
-  "TSLA": "2026-11-10 14:30:00-05:00"
+  "LLY": "2026-11-10 15:30:00-05:00",
+  "TSLA": "2026-11-10 15:30:00-05:00"
  }
 }
