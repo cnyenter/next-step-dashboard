@@ -46,6 +46,7 @@ EOD_AFTER = (16, 10)           # ET: the daily wrap runs on the first run after 
 RULE_FUNCS = ["swing_pivots", "watch_state", "pick_targets", "_reject", "screen_setup"]
 OPTIONAL_FUNCS = ["_ma_levels"]      # helpers newer versions of app.py use; older ones simply do not have them
 RULE_NAMES = ["UNIVERSE_SECTORS", "UNIVERSE", "SCREEN_DEFAULTS", "WATCHLIST"]
+OPTIONAL_NAMES = ["SCREEN_RULES_V1"]  # SCREEN_DEFAULTS is built from it in newer versions of app.py
 
 
 def load_rules(app_path):
@@ -58,13 +59,15 @@ def load_rules(app_path):
             funcs[node.name] = node
         elif isinstance(node, ast.Assign):
             for tg in node.targets:
-                if isinstance(tg, ast.Name) and tg.id in RULE_NAMES and tg.id not in assigns:
+                if isinstance(tg, ast.Name) and tg.id in RULE_NAMES + OPTIONAL_NAMES and tg.id not in assigns:
                     assigns[tg.id] = node
     missing = [n for n in RULE_FUNCS if n not in funcs] + [n for n in RULE_NAMES if n not in assigns]
     if missing:
         raise RuntimeError("app.py no longer defines: " + ", ".join(missing))
     ns = {"pd": pd, "np": np}
-    for name in ["UNIVERSE_SECTORS", "UNIVERSE", "SCREEN_DEFAULTS", "WATCHLIST"]:
+    for name in ["UNIVERSE_SECTORS", "UNIVERSE"] + OPTIONAL_NAMES + ["SCREEN_DEFAULTS", "WATCHLIST"]:
+        if name not in assigns:
+            continue
         exec(compile(ast.Module(body=[assigns[name]], type_ignores=[]), app_path, "exec"), ns)
     for name in OPTIONAL_FUNCS + RULE_FUNCS:
         if name not in funcs:

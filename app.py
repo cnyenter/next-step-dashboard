@@ -471,8 +471,13 @@ UNIVERSE_SECTORS = {
 }
 UNIVERSE = sorted(UNIVERSE_SECTORS.keys())
 
-SCREEN_DEFAULTS = dict(min_dv=20.0, max_ext=6.0, pullback_win=5, req_rs=True,
+# The rules in force until Nov 11, 2026. The Shadow Book judges setups raised before RULES_V2_FROM by these.
+SCREEN_RULES_V1 = dict(min_dv=20.0, max_ext=6.0, pullback_win=5, req_rs=True,
                        min_stop_atr=0.75, min_rr=2.0, max_atr=15.0, pos_cap=15.0)
+# The live rules from Nov 11, 2026, chosen with the Rule Changes Compared backtest: T1 within 8 ATRs, the 50 / 100 /
+# 200MA count as targets when nearer than a swing high, and the next open must be within 1 ATR of the signal close.
+RULES_V2_FROM = pd.Timestamp("2026-11-11")
+SCREEN_DEFAULTS = dict(SCREEN_RULES_V1, max_atr=8.0, ma_targets=True, max_open_atr=1.0)
 
 @st.cache_data(ttl=3600, show_spinner="Scanning the universe...")
 def get_universe_ohlc(tickers, end_str, days=420):
@@ -654,20 +659,20 @@ def screen_setup(t, df, want_long, P, spx_3m, why=None):
 SHADOW_START = pd.Timestamp("2026-09-25")   # the first screener run: signals from this close onward are tracked
 # Streamlit's cache notices edits to the cached function but not to shadow_replay, which it calls. Raise this number
 # whenever shadow_replay starts recording something new, so a deploy shows it at once and not up to an hour later.
-SHADOW_CACHE_VERSION = 6
+SHADOW_CACHE_VERSION = 7
 SHADOW_PLAN = (0.50, 0.25)                  # share sold at T1 and at T2; the rest goes at the stop or the last target
 # The screener went long-only on this date, after the backtest showed its short setup losing in every year since 2022.
 # The live shadow book keeps the shorts raised before it as a record and tracks longs only from it. The backtest still
 # measures both sides, so the short rules stay in the code.
 SHORTS_OFF = pd.Timestamp("2026-10-27")
-# Rule changes the backtest can compare with the live rules (each is added on top of SCREEN_DEFAULTS).
+# Rule changes the backtest compares (each is added on top of SCREEN_RULES_V1, the rules before Nov 11).
 RULE_VARIANTS = {
-    "Current rules": {},
+    "Rules before Nov 11": {},
     "T1 within 8 ATRs": dict(max_atr=8.0),
     "T1 within 20% of price": dict(t1_max_pct=20.0),
     "Nearer targets (50 / 100 / 200MA)": dict(ma_targets=True),
     "Entry within 1 ATR of the close": dict(max_open_atr=1.0),
-    "Combined: MA targets, T1 within 8 ATRs, entry within 1 ATR": dict(ma_targets=True, max_atr=8.0, max_open_atr=1.0),
+    "Combined (live from Nov 11): MA targets, T1 within 8 ATRs, entry within 1 ATR": dict(ma_targets=True, max_atr=8.0, max_open_atr=1.0),
 }
 # The labelled backtest: the same replay run further back, ending the day before the live shadow book starts,
 # so the two never overlap. Each choice is the first close a setup may fire on.
@@ -800,7 +805,7 @@ def _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter=True, end=None
     return dict(df=df, ix=ix, n=n, ov=ov, hv=hv, lv=lv, cv=cv, long_ok=long_ok, short_ok=short_ok, t1_ok=t1_ok)
 
 def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_hist=160, prefilter=True, end_date=None,
-                  shorts_before=None):
+                  shorts_before=None, rules_before=None):
     """Replay the swing screener over history and manage every setup it would have raised.
 
     For each close from `start_date`, the shared rules are run on exactly the data that existed then
@@ -816,6 +821,10 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
     `end_date`, when given, is the last close a setup may fire on (the backtest stops the day before the live
     book starts); trades opened by then are still managed through the latest bar.
     `shorts_before`, when given, stops short setups from that close on (the screener is long-only from SHORTS_OFF).
+    `rules_before`, a (date, rules) pair, judges setups that fired before that date by the older rules, so a rule
+    change does not rewrite the record kept before it.
+    A skipped setup also records what it would have done if taken at that open anyway (`what_if_r`, measured
+    against the risk planned at the signal close), so the entry rule itself can be judged.
     """
     start = pd.Timestamp(start_date).normalize()
     end = None if end_date is None else pd.Timestamp(end_date).normalize()
@@ -860,7 +869,11 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
 
     w, tol, trades = int(P["pullback_win"]), 1e-9, []
     for t, df in data.items():
-        prep = _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter, end)
+        P_pref = P if rules_before is None else dict(rules_before[1], **{k_: v_ for k_, v_ in P.items()})
+        if rules_before is not None:      # the prefilter has to let through anything either rule set could pass
+            P_pref["max_atr"] = max(P.get("max_atr", 0), rules_before[1].get("max_atr", 0))
+            P_pref["ma_targets"] = bool(P.get("ma_targets") or rules_before[1].get("ma_targets"))
+        prep = _signal_prep(df, P_pref, start, min_hist, sidx, s_close, prefilter, end)
         if prep is None:
             continue
         df, ix, n, ov, hv, lv, cv = prep["df"], prep["ix"], prep["n"], prep["ov"], prep["hv"], prep["lv"], prep["cv"]
@@ -874,7 +887,8 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
                 if not want_long and no_short is not None and ix[i] >= no_short:
                     continue                               # long-only from SHORTS_OFF
                 if ok[i] and t1_ok(i, want_long):
-                    res = screen_setup(t, df.iloc[: i + 1], want_long, P, spx_3m_at(ix[i]))
+                    P_i = rules_before[1] if (rules_before is not None and ix[i] < rules_before[0]) else P
+                    res = screen_setup(t, df.iloc[: i + 1], want_long, P_i, spx_3m_at(ix[i]))
                     if res is not None:
                         is_long = want_long
                         break
@@ -890,7 +904,17 @@ def shadow_replay(data, spx, P, start_date=SHADOW_START, plan=SHADOW_PLAN, min_h
             k = i + 1
             entry = float(ov[k])
             if not (res["open_lo"] <= entry <= res["open_hi"]):
-                trades.append(dict(rec, status="Skipped", entry=entry, entry_date=ix[k].date()))
+                # what taking it at that open anyway would have done, in R of the risk planned at the signal
+                beyond = (entry <= res["stop"]) if is_long else (entry >= res["stop"])
+                wi_r, wi_hits = None, None
+                if not beyond:
+                    wk_ = walk_trade(ov, hv, lv, cv, k, is_long, entry, res["stop"], res["tg"], plan)
+                    res_pct = trade_result(entry, is_long, wk_["legs"], wk_["last"], 0.0 if wk_["done"] else 1.0 - wk_["sold"])
+                    plan_risk = abs(res["px"] - res["stop"]) / res["px"] * 100.0
+                    wi_r, wi_hits = (res_pct / plan_risk if plan_risk else None), wk_["hits"]
+                gap = "above" if entry > res["open_hi"] else "below"
+                trades.append(dict(rec, status="Skipped", entry=entry, entry_date=ix[k].date(), gap=gap,
+                                   beyond_stop=beyond, what_if_r=wi_r, what_if_hits=wi_hits))
                 continue
             wk = walk_trade(ov, hv, lv, cv, k, is_long, entry, res["stop"], res["tg"], plan)
             risk_pct = abs(entry - res["stop"]) / entry * 100.0
@@ -2363,7 +2387,8 @@ elif page_selection == "Swing Book":
             sx_ = fetch_history("^SPX", period="2y", interval="1d")
             if sx_ is None or len(sx_) < 70:
                 return None
-            return shadow_replay(data, sx_, SCREEN_DEFAULTS, SHADOW_START, shorts_before=SHORTS_OFF)
+            return shadow_replay(data, sx_, SCREEN_DEFAULTS, SHADOW_START, shorts_before=SHORTS_OFF,
+                                 rules_before=(RULES_V2_FROM, SCREEN_RULES_V1))
 
         sh_err = None
         try:
@@ -2516,7 +2541,7 @@ elif page_selection == "Swing Book":
                                 end=end_str, interval="1d")
             if sx_ is None or len(sx_) < 70:
                 return None
-            P_ = dict(SCREEN_DEFAULTS, **RULE_VARIANTS.get(variant, {}))
+            P_ = dict(SCREEN_RULES_V1, **RULE_VARIANTS[variant]) if variant else SCREEN_DEFAULTS
             return shadow_replay(data, sx_, P_, start_ts, end_date=SHADOW_START - pd.Timedelta(days=1),
                                  shorts_before=(pd.Timestamp(start_iso) if variant else None))
 
@@ -2650,6 +2675,31 @@ elif page_selection == "Swing Book":
                                 + ("<p style='color:" + MUTED + ";font-size:12px;margin:6px 2px 0 2px;'>Showing the 40 most recent of %d.</p>" % len(sb)
                                    if len(sb) > 40 else ""), unsafe_allow_html=True)
 
+                # the entry rule itself: what the skipped setups (longs) would have done if taken at that open anyway
+                skl = [x_ for x_ in bt_trades if x_["side"] == "Long" and x_["status"] == "Skipped"]
+                if skl:
+                    def _wi(sub):
+                        rr_ = [x_["what_if_r"] for x_ in sub if x_.get("what_if_r") is not None]
+                        return (len(sub), (sum(rr_) / len(rr_) if rr_ else None), sum(rr_),
+                                (sum(1 for x_ in sub if (x_.get("what_if_hits") or 0) >= 1) / len(rr_) * 100.0 if rr_ else None))
+                    ent_l = [x_ for x_ in b_ent_list if x_["side"] == "Long"]
+                    rl_ = [x_["r_mult"] for x_ in ent_l if x_.get("r_mult") is not None]
+                    tl4 = tile("Longs taken", _br(sum(rl_) / len(rl_) if rl_ else None),
+                               "%d entered, net %s" % (len(ent_l), _br(sum(rl_), 1)), _bcol(sum(rl_) if rl_ else None))
+                    for lab, sub in (("Skipped: gapped above", [x_ for x_ in skl if x_.get("gap") == "above"]),
+                                     ("Skipped: opened below range", [x_ for x_ in skl if x_.get("gap") == "below" and not x_.get("beyond_stop")])):
+                        n_, a_, t_, h_ = _wi(sub)
+                        tl4 += tile(lab, _br(a_), ("%d setups, net %s if taken, %s reached T1" % (n_, _br(t_, 1), ("%.0f%%" % h_) if h_ is not None else "n/a"))
+                                    if n_ else "none", _bcol(a_))
+                    n_bs = sum(1 for x_ in skl if x_.get("beyond_stop"))
+                    tl4 += tile("Opened past the stop", str(n_bs), "no trade possible", MUTED)
+                    st.markdown("<div style='font-size:11.5px;text-transform:uppercase;letter-spacing:1px;color:" + MUTED + ";margin:16px 0 4px 2px;'>"
+                                "Skipped setups: what if they had been taken at the open anyway? (longs)</div><div class='ns-row'>" + tl4 + "</div>"
+                                "<p style='color:" + MUTED + ";font-size:12.5px;margin:6px 2px 0 2px;'>A skipped setup opened outside its valid range. "
+                                "Here it is entered at that open regardless and managed with the same stop, targets and exits. Its R is measured "
+                                "against the risk planned at the signal close, so a gap does not inflate it. If a skipped group beats the longs "
+                                "taken, the entry rule is turning away good trades.</p>", unsafe_allow_html=True)
+
                 st.markdown("<p style='color:" + MUTED + "; font-size:12.5px; margin:10px 2px 0 2px;'>"
                             "<strong>Read this as a backtest, not a track record.</strong> It runs on today's universe list, so names "
                             "that fell out of the large-cap list (or were not public yet) are handled as if you knew the list in "
@@ -2704,7 +2754,7 @@ elif page_selection == "Swing Book":
                 if m_ is None:
                     body_c += "<tr><td>" + vname + "</td><td colspan='8' style='color:" + MUTED + ";'>could not be built</td></tr>"
                     continue
-                body_c += ("<tr><td style='font-weight:" + ("700" if vname == "Current rules" else "400") + ";'>" + vname + "</td>"
+                body_c += ("<tr><td style='font-weight:" + ("700" if vname.startswith("Combined") else "400") + ";'>" + vname + "</td>"
                            + _rc(m_["ent"], "{:d}") + _rc(m_["skip"], "{:d}") + _rc(m_["win"], "{:.0f}%") + _rc(m_["t1"], "{:.0f}%")
                            + _rc(m_["avg"], "{:+.2f}R", 0.0) + _rc(m_["net"], "{:+.1f}R", 0.0)
                            + _rc(m_["t1d"], "{:.1f}%") + _rc(m_["wid"], "{:.1f}%") + "</tr>")
@@ -3809,7 +3859,8 @@ elif page_selection == "Swing Screener":
 
     # Defaults that the public view always uses
     direction, min_rr, max_ext, min_dv, req_rs = "Long", 2.0, 6.0, 20.0, True
-    pos_cap, max_atr, pullback_win = 15.0, 15.0, 5
+    pos_cap, max_atr, pullback_win = 15.0, SCREEN_DEFAULTS["max_atr"], 5
+    ma_targets, max_open_atr = SCREEN_DEFAULTS["ma_targets"], SCREEN_DEFAULTS["max_open_atr"]
     lookback_sessions = 20
     min_stop_atr = 0.75
     scale_plan = "50 / 25 / 25"
@@ -3852,8 +3903,8 @@ elif page_selection == "Swing Screener":
                                                 "on the day. It always reaches back to the screener's first run, so "
                                                 "a setup stays until its stop or T1 is touched; this only looks "
                                                 "further back than that. 1 means today only.")
-        max_atr = st.number_input("Max average daily ranges to T1", 4.0, 60.0, 15.0, 1.0,
-                                  help="One ATR is roughly one session of movement, so 15 is about three weeks. "
+        max_atr = st.number_input("Max average daily ranges to T1", 4.0, 60.0, float(SCREEN_DEFAULTS["max_atr"]), 1.0,
+                                  help="One ATR is roughly one session of movement, so 8 is about a week and a half. "
                                        "A structurally valid target that sits 40 ATRs away is a position trade, not a swing.")
     else:
         st.caption("Candidates are generated from a fixed rule set: 21MA pullback in an established uptrend, "
@@ -3924,7 +3975,8 @@ elif page_selection == "Swing Screener":
         # the settings on this page, handed to the shared rules
         return screen_setup(t, df, want_long, dict(min_dv=min_dv, max_ext=max_ext, pullback_win=pullback_win,
                                                    req_rs=req_rs, min_stop_atr=min_stop_atr, min_rr=min_rr,
-                                                   max_atr=max_atr, pos_cap=pos_cap), spx_3m)
+                                                   max_atr=max_atr, pos_cap=pos_cap, ma_targets=ma_targets,
+                                                   max_open_atr=max_open_atr), spx_3m)
 
     want_long = (direction == "Long")
     hits = []
@@ -3982,7 +4034,8 @@ elif page_selection == "Swing Screener":
         # day scrolled out. Anchoring at the screener's first run keeps each one where it is until it is resolved.
         start_d = min(start_d, SHADOW_START.date())
         P_now = dict(min_dv=min_dv, max_ext=max_ext, pullback_win=pullback_win, req_rs=req_rs,
-                     min_stop_atr=min_stop_atr, min_rr=min_rr, max_atr=max_atr, pos_cap=pos_cap)
+                     min_stop_atr=min_stop_atr, min_rr=min_rr, max_atr=max_atr, pos_cap=pos_cap,
+                     ma_targets=ma_targets, max_open_atr=max_open_atr)
         by_t = {}
         for x in find_signals(data, sx, P_now, start_d, want_long=want_long):
             if x["fired"] < last_d:                 # today's close is the main list above
