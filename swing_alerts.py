@@ -233,12 +233,20 @@ class Run:
 
     def _log(self, name, row):
         path = os.path.join(self.folder, name)
-        new = not os.path.exists(path)
-        with open(path, "a", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(row.keys()))
-            if new:
-                w.writeheader()
-            w.writerow(row)
+        os.makedirs(self.folder, exist_ok=True)
+        rows, fields = [], list(row.keys())
+        if os.path.exists(path):
+            with open(path, newline="") as f:
+                rd = csv.DictReader(f)
+                rows = list(rd)
+                old = rd.fieldnames or []
+            fields = old + [k for k in fields if k not in old]
+        rows.append(row)
+        with open(path, "w", newline="") as f:          # rewritten whole, so a new column never misaligns old rows
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
+            for r_ in rows:
+                w.writerow({k: r_.get(k, "") for k in fields})
 
     def say(self, text):
         self.msgs.append(text)
@@ -302,7 +310,7 @@ class Run:
         tr.update(exit_ts=str(ts), how=how, r=r, pct=pct)
         icon = "✅" if (r or 0) > 0 else ("⚪" if abs(r or 0) < 0.05 else "🛑")
         self.say("%s **%s closed: %s.** %+.2f%% (%+.2fR) from %s." % (icon, tr["t"], how, pct, r or 0.0, px(tr["entry"])))
-        self._log("trades.csv", dict(ticker=tr["t"], entry_ts=tr["entry_ts"], entry=round(tr["entry"], 2),
+        self._log("trades.csv", dict(ticker=tr["t"], source=tr.get("source", "watchlist"), entry_ts=tr["entry_ts"], entry=round(tr["entry"], 2),
                                      stop=round(tr["stop"], 2), t1=tr["targets"][0] if tr["targets"] else "",
                                      exit_ts=str(ts), how=how, hits=tr["hits"], pct=round(pct, 2),
                                      r=round(r, 2) if r is not None else ""))
@@ -378,6 +386,46 @@ class Run:
                     self._log("triggers.csv", dict(date=str(self.today), ticker=t, event="entry", ts=str(end),
                                                    price=round(cl, 2), ma21=w["ma21"], note=""))
 
+    # ---- yesterday's screener setups: filled or skipped at today's open
+    def open_fills(self, hourly):
+        pend = [p for p in self.state.get("pending", []) if p["day"] < str(self.today)]
+        if not pend:
+            return
+        keep = []
+        for p in pend:
+            h = hourly.get(p["t"])
+            hd = h[h.index.date == self.today] if h is not None else None
+            if hd is None or not len(hd):
+                keep.append(p)                                       # no print yet for this name: try again next run
+                continue
+            o = float(hd["Open"].iloc[0])
+            busy = any(x["t"] == p["t"] and x["status"] != "closed" for x in self.state["trades"])
+            if busy:
+                self.say("➖ %s opened %s, but it is already an open swing alert trade, so the screener setup is not added."
+                         % (p["t"], px(o)))
+                continue
+            if not (p["lo"] <= o <= p["hi"]):
+                side_ = "above" if o > p["hi"] else "below"
+                self.say("⏭️ **%s skipped**: opened %s, %s its valid range (%s to %s). No trade." % (p["t"], px(o), side_, px(p["lo"]), px(p["hi"])))
+                self._log("triggers.csv", dict(date=str(self.today), ticker=p["t"], event="screener_skipped", ts=str(hd.index[0]),
+                                               price=round(o, 2), ma21="", note=side_ + " the range"))
+                continue
+            ts0 = hd.index[0]
+            tr = dict(t=p["t"], entry=o, entry_ts=str(ts0 - pd.Timedelta(minutes=1)), entry_day=str(self.today),
+                      stop=p["stop"], stop_now=p["stop"], targets=p["tg"], hits=0, sold=0.0, legs=[],
+                      status="open", source="screener")
+            self.state["trades"].append(tr)
+            risk = (o - p["stop"]) / o * 100.0
+            rr = (p["tg"][0] - o) / (o - p["stop"]) if o > p["stop"] else 0.0
+            self.say("🟢 **FILLED %s long at the open, %s** (Swing Screener setup from %s's close; valid range %s to %s)\n"
+                     "Stop %s (%.1f%% risk) · Targets %s · R:R to T1 from this fill %.1f\n"
+                     "Plan: sell 50%% at T1 and move the stop to breakeven, 25%% at T2, the rest at T3."
+                     % (p["t"], px(o), pd.Timestamp(p["day"]).strftime("%a"), px(p["lo"]), px(p["hi"]), px(p["stop"]), risk,
+                        " / ".join(px(x) for x in p["tg"]), rr))
+            self._log("triggers.csv", dict(date=str(self.today), ticker=p["t"], event="screener_filled", ts=str(ts0),
+                                           price=round(o, 2), ma21="", note=""))
+        self.state["pending"] = [p for p in self.state.get("pending", []) if p["day"] >= str(self.today)] + keep
+
     # ---- after the close
     def end_of_day(self, daily, spx):
         if self.state.get("eod_done") == str(self.today):
@@ -419,9 +467,12 @@ class Run:
             except Exception:
                 continue
             new.append(res)
+        self.state["pending"] = [dict(t=r["t"], day=str(self.today), px=float(r["px"]), stop=float(r["stop"]),
+                                      tg=[float(x) for x in r["tg"]], lo=float(r["open_lo"]), hi=float(r["open_hi"]),
+                                      sec=r["sec"]) for r in new]
         if new:
-            lines.append("**New Swing Screener setups at today's close** (the Shadow Book enters at the next open, "
-                         "only if the open is inside the valid range):")
+            lines.append("**New Swing Screener setups at today's close.** Each is taken at tomorrow's open only if the "
+                         "open is inside its valid range; you will get a FILLED or SKIPPED alert after the open:")
             for r in sorted(new, key=lambda x: -x["rr"]):
                 lines.append("`%-5s` close %s · valid open %s to %s · stop %s · T1 %s · R:R %.1f · %s"
                              % (r["t"], px(r["px"]), px(r["open_lo"]), px(r["open_hi"]), px(r["stop"]),
@@ -434,7 +485,8 @@ class Run:
                 if df is None:
                     continue
                 last = float(df["Close"].iloc[-1])
-                parts.append("%s %+.1f%%%s" % (tr["t"], (last / tr["entry"] - 1) * 100.0,
+                parts.append("%s%s %+.1f%%%s" % (tr["t"], " (screener)" if tr.get("source") == "screener" else "",
+                                               (last / tr["entry"] - 1) * 100.0,
                                                ", T%d hit" % tr["hits"] if tr["hits"] else ""))
             lines.append("Open swing alert trades: " + "; ".join(parts) + ".")
         if lines:
@@ -445,6 +497,7 @@ class Run:
         if self.now.weekday() >= 5 or not day_open:
             return
         trades_t = {tr["t"] for tr in self.state["trades"] if tr["status"] != "closed"}
+        trades_t |= {p["t"] for p in self.state.get("pending", [])}
         need = set(self.R["WATCHLIST"]) | trades_t
         eod = (self.now.hour, self.now.minute) >= EOD_AFTER and self.state.get("eod_done") != str(self.today)
         if eod:
@@ -455,6 +508,7 @@ class Run:
         daily = self.data.daily(sorted(need) + ["^GSPC"])
         spx = daily.pop("^GSPC", None)
         self.setup_day(daily, spx)
+        self.open_fills(hourly)
         self.hourly(daily, hourly, spx)
         self.end_of_day(daily, spx)
         self.state["trades"] = [x for x in self.state["trades"]
