@@ -44,6 +44,7 @@ EOD_AFTER = (16, 10)           # ET: the daily wrap runs on the first run after 
 # ------------------------------------------------------------------------------------------- rules from app.py
 
 RULE_FUNCS = ["swing_pivots", "watch_state", "pick_targets", "_reject", "screen_setup"]
+OPTIONAL_FUNCS = ["_ma_levels"]      # helpers newer versions of app.py use; older ones simply do not have them
 RULE_NAMES = ["UNIVERSE_SECTORS", "UNIVERSE", "SCREEN_DEFAULTS", "WATCHLIST"]
 
 
@@ -53,7 +54,7 @@ def load_rules(app_path):
     tree = ast.parse(src)
     funcs, assigns = {}, {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name in RULE_FUNCS and node.name not in funcs:
+        if isinstance(node, ast.FunctionDef) and node.name in RULE_FUNCS + OPTIONAL_FUNCS and node.name not in funcs:
             funcs[node.name] = node
         elif isinstance(node, ast.Assign):
             for tg in node.targets:
@@ -65,7 +66,9 @@ def load_rules(app_path):
     ns = {"pd": pd, "np": np}
     for name in ["UNIVERSE_SECTORS", "UNIVERSE", "SCREEN_DEFAULTS", "WATCHLIST"]:
         exec(compile(ast.Module(body=[assigns[name]], type_ignores=[]), app_path, "exec"), ns)
-    for name in RULE_FUNCS:
+    for name in OPTIONAL_FUNCS + RULE_FUNCS:
+        if name not in funcs:
+            continue
         exec(compile(ast.Module(body=[funcs[name]], type_ignores=[]), app_path, "exec"), ns)
     return ns
 

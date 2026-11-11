@@ -517,6 +517,17 @@ def pick_targets(cands, atr, gap=1.0, n=3, last=None):
     return out
 
 
+def _ma_levels(c, px, above):
+    """The 50, 100 and 200 day averages on the far side of price, as extra target candidates (rule option
+    ma_targets): a long recovering under its 100MA or 200MA meets them long before an old swing high."""
+    out = []
+    for n in (50, 100, 200):
+        if len(c) >= n:
+            v = float(c.tail(n).mean())
+            if (v > px * 1.005) if above else (v < px * 0.995):
+                out.append(round(v, 2))
+    return out
+
 def _reject(why, reason):
     """Note which rule ruled a name out, when the caller asked, and return None exactly as before."""
     if why is not None:
@@ -564,7 +575,8 @@ def screen_setup(t, df, want_long, P, spx_3m, why=None):
         risk = px - stop
         if risk < atr * P["min_stop_atr"]:
             return _reject(why, 'Stop too tight')
-        cand = sorted(set(round(float(x), 2) for x in swing_pivots(h.tail(160), 5, True).values if x > px * 1.005))
+        cand = sorted(set(round(float(x), 2) for x in swing_pivots(h.tail(160), 5, True).values if x > px * 1.005)
+                      | set(_ma_levels(c, px, True) if P.get("ma_targets") else []))
         tg = pick_targets(cand, atr)
         if len(tg) < 3:
             lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
@@ -591,8 +603,8 @@ def screen_setup(t, df, want_long, P, spx_3m, why=None):
         risk = stop - px
         if risk < atr * P["min_stop_atr"]:
             return _reject(why, 'Stop too tight')
-        cand = sorted(set(round(float(x), 2) for x in swing_pivots(l.tail(160), 5, False).values if x < px * 0.995),
-                      reverse=True)
+        cand = sorted(set(round(float(x), 2) for x in swing_pivots(l.tail(160), 5, False).values if x < px * 0.995)
+                      | set(_ma_levels(c, px, False) if P.get("ma_targets") else []), reverse=True)
         tg = pick_targets(cand, atr)
         if len(tg) < 3:
             lo60, hi60 = float(l.tail(60).min()), float(h.tail(60).max())
@@ -611,6 +623,8 @@ def screen_setup(t, df, want_long, P, spx_3m, why=None):
     atr_t1 = abs(tg[0] - px) / atr
     if atr_t1 > P["max_atr"]:
         return _reject(why, 'Target too far away')
+    if P.get("t1_max_pct") and abs(tg[0] / px - 1.0) * 100.0 > P["t1_max_pct"]:
+        return _reject(why, 'Target too far away')
     # Entries here are the last close, but the order goes in at the next open. This is the range of
     # opens at which the setup still clears the two rules that depend on the entry price, with the
     # stop and T1 left where they are: reward at least P["min_rr"] times the risk, and a stop at least
@@ -618,9 +632,13 @@ def screen_setup(t, df, want_long, P, spx_3m, why=None):
     if want_long:
         open_hi = (tg[0] + P["min_rr"] * stop) / (1.0 + P["min_rr"])
         open_lo = stop + atr * P["min_stop_atr"]
+        if P.get("max_open_atr"):                   # a gap of more than this many ATRs is a different trade
+            open_hi = min(open_hi, px + atr * P["max_open_atr"])
     else:
         open_lo = (P["min_rr"] * stop + tg[0]) / (1.0 + P["min_rr"])
         open_hi = stop - atr * P["min_stop_atr"]
+        if P.get("max_open_atr"):
+            open_lo = max(open_lo, px - atr * P["max_open_atr"])
     # Flat sizing: every candidate gets the same share of the book, so the risk on each
     # trade is whatever its stop distance makes it. The Risk column shows that figure.
     return dict(t=t, sec=UNIVERSE_SECTORS.get(t, "Other"), px=px, stop=stop, tg=tg, rr=rr,
@@ -636,12 +654,21 @@ def screen_setup(t, df, want_long, P, spx_3m, why=None):
 SHADOW_START = pd.Timestamp("2026-09-25")   # the first screener run: signals from this close onward are tracked
 # Streamlit's cache notices edits to the cached function but not to shadow_replay, which it calls. Raise this number
 # whenever shadow_replay starts recording something new, so a deploy shows it at once and not up to an hour later.
-SHADOW_CACHE_VERSION = 5
+SHADOW_CACHE_VERSION = 6
 SHADOW_PLAN = (0.50, 0.25)                  # share sold at T1 and at T2; the rest goes at the stop or the last target
 # The screener went long-only on this date, after the backtest showed its short setup losing in every year since 2022.
 # The live shadow book keeps the shorts raised before it as a record and tracks longs only from it. The backtest still
 # measures both sides, so the short rules stay in the code.
 SHORTS_OFF = pd.Timestamp("2026-10-27")
+# Rule changes the backtest can compare with the live rules (each is added on top of SCREEN_DEFAULTS).
+RULE_VARIANTS = {
+    "Current rules": {},
+    "T1 within 8 ATRs": dict(max_atr=8.0),
+    "T1 within 20% of price": dict(t1_max_pct=20.0),
+    "Nearer targets (50 / 100 / 200MA)": dict(ma_targets=True),
+    "Entry within 1 ATR of the close": dict(max_open_atr=1.0),
+    "Combined: MA targets, T1 within 8 ATRs, entry within 1 ATR": dict(ma_targets=True, max_atr=8.0, max_open_atr=1.0),
+}
 # The labelled backtest: the same replay run further back, ending the day before the live shadow book starts,
 # so the two never overlap. Each choice is the first close a setup may fire on.
 BACKTEST_STARTS = {
@@ -764,6 +791,8 @@ def _signal_prep(df, P, start, min_hist, sidx, s_close, prefilter=True, end=None
                 if piv.size == 0:
                     return True
                 reward, risk = cv[i] - piv.max(), hi10[i] - cv[i]
+            if P.get("ma_targets"):     # an average can be a nearer target than any pivot: only the 2:1 part still holds
+                return reward >= P["min_rr"] * risk - 0.01
             return reward >= P["min_rr"] * risk - 0.01 and reward / atrv[i] <= P["max_atr"] + 0.01 / atrv[i]
     else:
         long_ok = short_ok = live
@@ -2473,7 +2502,7 @@ elif page_selection == "Swing Book":
                 st.session_state["bt_ran"] = bt_label
 
         @st.cache_data(ttl=6 * 3600, show_spinner="Downloading years of history and replaying the screener (a minute or two)...")
-        def get_backtest_trades(start_iso, end_str, today_iso, live, code_version):
+        def get_backtest_trades(start_iso, end_str, today_iso, live, code_version, variant=""):
             start_ts = pd.Timestamp(start_iso)
             # enough calendar days before the first signal for the 160-session lookback the live screener has
             days = int((pd.Timestamp(end_str) - start_ts).days) + 420
@@ -2487,7 +2516,9 @@ elif page_selection == "Swing Book":
                                 end=end_str, interval="1d")
             if sx_ is None or len(sx_) < 70:
                 return None
-            return shadow_replay(data, sx_, SCREEN_DEFAULTS, start_ts, end_date=SHADOW_START - pd.Timedelta(days=1))
+            P_ = dict(SCREEN_DEFAULTS, **RULE_VARIANTS.get(variant, {}))
+            return shadow_replay(data, sx_, P_, start_ts, end_date=SHADOW_START - pd.Timedelta(days=1),
+                                 shorts_before=(pd.Timestamp(start_iso) if variant else None))
 
         bt_choice = st.session_state.get("bt_ran")
         if bt_choice not in BACKTEST_STARTS:
@@ -2626,6 +2657,66 @@ elif page_selection == "Swing Book":
                             "splits and dividends, fills are at the open with no commissions or slippage, positions are unlimited "
                             "and each trade stands alone. Trades raised before " + SHADOW_START.strftime("%b %d") + " that are still "
                             "running are marked to the last close.</p>", unsafe_allow_html=True)
+
+        # ---- Rule comparison: the same backtest under each candidate rule change, longs only ----
+        st.markdown("<div class='ns-section' style='margin-top:26px;'>⚖️ Rule Changes Compared "
+                    "<span style='font-size:12px; font-weight:400; text-transform:none; letter-spacing:0; color:" + AMBER
+                    + ";'>&nbsp;BACKTEST, longs only</span></div>", unsafe_allow_html=True)
+        st.markdown("<p style='color:" + MUTED + "; font-size:14px; margin:-4px 0 10px 2px;'>The backtest above, rerun "
+                    "with each proposed change to how far T1 may be and how wide the entry range may be. Same period ("
+                    + bt_label.split(" (")[0].lower() + "), same exits. Shorts are left out because the screener is long-only.</p>",
+                    unsafe_allow_html=True)
+        if st.button("Compare rule changes", key="bt_cmp"):
+            st.session_state["bt_cmp_for"] = bt_label
+        cmp_for = st.session_state.get("bt_cmp_for")
+        if cmp_for in BACKTEST_STARTS:
+            rows_c = []
+            prog = st.progress(0.0, text="Replaying each rule set...")
+            for k_, vname in enumerate(RULE_VARIANTS):
+                try:
+                    vt = get_backtest_trades(BACKTEST_STARTS[cmp_for], _end_str, _today.isoformat(), _live,
+                                             SHADOW_CACHE_VERSION, vname)
+                except Exception as e_:
+                    vt = None
+                prog.progress((k_ + 1) / len(RULE_VARIANTS), text="Replayed: " + vname)
+                if not vt:
+                    rows_c.append((vname, None))
+                    continue
+                lg = [x_ for x_ in vt if x_["side"] == "Long"]
+                ent = [x_ for x_ in lg if x_["status"] in ("Open", "Closed")]
+                rs_ = [x_["r_mult"] for x_ in ent if x_.get("r_mult") is not None]
+                cl_ = [x_ for x_ in ent if x_["status"] == "Closed"]
+                t1d = sorted((x_["tg"][0] / x_["signal_px"] - 1.0) * 100.0 for x_ in lg if x_.get("tg"))
+                wid = sorted((x_["open_hi"] - x_["open_lo"]) / x_["signal_px"] * 100.0 for x_ in lg)
+                rows_c.append((vname, dict(sig=len(lg), ent=len(ent), skip=sum(1 for x_ in lg if x_["status"] == "Skipped"),
+                                           win=(sum(1 for x_ in cl_ if x_["result"] > 0) / len(cl_) * 100.0 if cl_ else None),
+                                           t1=(sum(1 for x_ in ent if x_["hits"] >= 1) / len(ent) * 100.0 if ent else None),
+                                           avg=(sum(rs_) / len(rs_) if rs_ else None), net=sum(rs_),
+                                           t1d=(t1d[len(t1d) // 2] if t1d else None), wid=(wid[len(wid) // 2] if wid else None))))
+            prog.empty()
+            def _rc(v, fmt, good=None):
+                if v is None:
+                    return "<td style='text-align:right;color:" + MUTED + ";'>n/a</td>"
+                col = TEXT if good is None else (GREEN if v >= good else RED)
+                return "<td style='text-align:right;color:" + col + ";'>" + fmt.format(v) + "</td>"
+            body_c = ""
+            for vname, m_ in rows_c:
+                if m_ is None:
+                    body_c += "<tr><td>" + vname + "</td><td colspan='8' style='color:" + MUTED + ";'>could not be built</td></tr>"
+                    continue
+                body_c += ("<tr><td style='font-weight:" + ("700" if vname == "Current rules" else "400") + ";'>" + vname + "</td>"
+                           + _rc(m_["ent"], "{:d}") + _rc(m_["skip"], "{:d}") + _rc(m_["win"], "{:.0f}%") + _rc(m_["t1"], "{:.0f}%")
+                           + _rc(m_["avg"], "{:+.2f}R", 0.0) + _rc(m_["net"], "{:+.1f}R", 0.0)
+                           + _rc(m_["t1d"], "{:.1f}%") + _rc(m_["wid"], "{:.1f}%") + "</tr>")
+            st.markdown("<table class='ns-tbl'><tr><th style='text-align:left;'>Rule set</th><th style='text-align:right;'>Entered</th>"
+                        "<th style='text-align:right;'>Skipped</th><th style='text-align:right;'>Closed in profit</th>"
+                        "<th style='text-align:right;'>Reached T1</th><th style='text-align:right;'>Avg R</th>"
+                        "<th style='text-align:right;'>Net R</th><th style='text-align:right;'>Typical T1 away</th>"
+                        "<th style='text-align:right;'>Typical entry range</th></tr>" + body_c + "</table>"
+                        "<p style='color:" + MUTED + "; font-size:12.5px; margin:8px 2px 0 2px;'>Typical means the median setup. "
+                        "<strong>T1 away</strong> is T1's distance above the signal close; <strong>entry range</strong> is the width "
+                        "of the valid open range as a share of price. Skipped setups opened outside their range. The same "
+                        "backtest caveats apply: today's universe, no costs, unlimited positions.</p>", unsafe_allow_html=True)
 
     st.markdown("<p style='color:" + MUTED + "; font-size:11px; text-align:center; margin-top:18px;'>"
                 "This is not trading advice. This is purely for information/education. Positions reflect the author's own tracking portfolio.</p>", unsafe_allow_html=True)
