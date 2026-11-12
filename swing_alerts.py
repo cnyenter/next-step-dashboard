@@ -252,7 +252,7 @@ class Run:
         self.msgs.append(text)
 
     # ---- the day's watchlist, frozen at the first run of the session
-    def setup_day(self, daily, spx):
+    def setup_day(self, daily, spx, hourly=None):
         if self.state.get("day") and self.state["day"].get("date") == str(self.today):
             return
         leaders = week_leaders(self.R, daily, self.today)
@@ -268,12 +268,25 @@ class Run:
                             zone_sent=False, entered=False, fail_note=None)
         self.state["day"] = dict(date=str(self.today), watch=watch)
         held = {tr["t"] for tr in self.state["trades"] if tr["status"] != "closed"}
+        def now_px(t):
+            """The latest price: the last hourly print today (the bar may still be forming), else the last close."""
+            h = (hourly or {}).get(t)
+            if h is not None and len(h):
+                hd = h[h.index.date == self.today]
+                if len(hd):
+                    return float(hd["Close"].iloc[-1])
+            df = daily.get(t)
+            return float(df["Close"].iloc[-1]) if df is not None and len(df) else None
+
+        def line(t, w):
+            p_ = now_px(t)
+            where = "" if p_ is None else "now %s (%+.1f%% vs 21MA) · " % (px(p_), (p_ / w["ma21"] - 1.0) * 100.0)
+            return "`%-5s` %s21MA %s · %s, %+.1f%% this week%s" % (t, where, px(w["ma21"]), w["label"], w["wk"],
+                                                                 "  · already in a trade" if t in held else "")
         if watch and (self.now.hour, self.now.minute) < (16, 0):   # a first run after the close is too late to act on
             self.say("**Swing watchlist for " + self.today.strftime("%a %b %d") + "** (long only): an hourly close back "
                      "above the 21MA after a dip to it is the entry.\n"
-                     + "\n".join("`%-5s` 21MA %s  (%s, %+.1f%% this week)%s" % (t, px(w["ma21"]), w["label"], w["wk"],
-                                 "  · already in a trade" if t in held else "")
-                                 for t, w in watch.items()))
+                     + "\n".join(line(t, w) for t, w in watch.items()))
 
     # ---- open trades: stop, targets, breakeven
     def manage(self, tr, bar_ts, b):
@@ -485,8 +498,8 @@ class Run:
                 if df is None:
                     continue
                 last = float(df["Close"].iloc[-1])
-                parts.append("%s%s %+.1f%%%s" % (tr["t"], " (screener)" if tr.get("source") == "screener" else "",
-                                               (last / tr["entry"] - 1) * 100.0,
+                parts.append("%s%s %s, %+.1f%% from %s%s" % (tr["t"], " (screener)" if tr.get("source") == "screener" else "",
+                                               px(last), (last / tr["entry"] - 1) * 100.0, px(tr["entry"]),
                                                ", T%d hit" % tr["hits"] if tr["hits"] else ""))
             lines.append("Open swing alert trades: " + "; ".join(parts) + ".")
         if not lines:
@@ -509,7 +522,7 @@ class Run:
             return                                                   # no session today (a holiday) or no data yet
         daily = self.data.daily(sorted(need) + ["^GSPC"])
         spx = daily.pop("^GSPC", None)
-        self.setup_day(daily, spx)
+        self.setup_day(daily, spx, hourly)
         self.open_fills(hourly)
         self.hourly(daily, hourly, spx)
         self.end_of_day(daily, spx)
