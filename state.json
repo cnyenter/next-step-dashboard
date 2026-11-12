@@ -1,11 +1,11 @@
 {
  "trades": [],
  "day": {
-  "date": "2026-11-11",
+  "date": "2026-11-12",
   "watch": {
    "TSLA": {
-    "ma21": 379.49,
-    "wk": 5.4,
+    "ma21": 380.53,
+    "wk": 8.5,
     "label": "At the 21MA now",
     "armed": false,
     "zone_sent": false,
@@ -13,8 +13,8 @@
     "fail_note": null
    },
    "LLY": {
-    "ma21": 1330.22,
-    "wk": 4.9,
+    "ma21": 1339.95,
+    "wk": 5.3,
     "label": "Extended",
     "armed": false,
     "zone_sent": false,
@@ -25,8 +25,8 @@
  },
  "eod_done": "2026-11-11",
  "processed": {
-  "LLY": "2026-11-11 15:30:00-05:00",
-  "TSLA": "2026-11-11 15:30:00-05:00"
+  "LLY": "2026-11-12 10:30:00-05:00",
+  "TSLA": "2026-11-12 10:30:00-05:00"
  },
  "pending": []
 }
