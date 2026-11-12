@@ -3179,6 +3179,23 @@ elif page_selection == "Weekly Recap":
                                reclaim=dict(price=ent[2], ts=ent[1]), close=d_close, pts=pts, flipped=False,
                                kind=("Hold" if kind_ == "HOLD" else "Press"), t1=t1, t1_hit=t1_hit))
 
+    # A Hold is the fallback for a day when price never pulls back (or rallies) into the reversal setup. Once a look below
+    # and fail has fired, a later hold above that day is not taken, and the same for a look above and fail and a hold
+    # below. A hold that fired first stands, and Press setups are never affected.
+    _kept = []
+    for s_ in setups:
+        if s_["kind"] == "Hold" and s_["reclaim"] is not None:
+            rev = "LBAF" if s_["sup"] else "LAAF"
+            first = [r_ for r_ in setups if r_["kind"] == rev and r_["day"] == s_["day"] and r_["reclaim"] is not None
+                     and r_["reclaim"]["ts"] < s_["reclaim"]["ts"]]
+            if first:
+                not_triggered.append(s_["day"].strftime("%a") + " hold " + ("above " if s_["sup"] else "below ")
+                                     + "{:.0f}".format(s_["zone"][0]) + " (a look " + ("below" if s_["sup"] else "above")
+                                     + " and fail fired first)")
+                continue
+        _kept.append(s_)
+    setups = _kept
+
     # Stacked levels swept by one move are one trade, not four: merge rows that share the day, the side and the
     # reclaim bar (or, with no reclaim, the sweep extreme), listing every level the move ran through.
     _grp = {}
