@@ -163,7 +163,7 @@ class Discord:
 # ------------------------------------------------------------------------------------------- helpers
 
 def px(v):
-    return "{:,.2f}".format(v)
+    return "{:.2f}".format(v)          # no thousands commas, as in the levels posts
 
 
 def r_mult(entry, stop, legs):
@@ -268,7 +268,7 @@ class Run:
                             zone_sent=False, entered=False, fail_note=None)
         self.state["day"] = dict(date=str(self.today), watch=watch)
         held = {tr["t"] for tr in self.state["trades"] if tr["status"] != "closed"}
-        if watch:
+        if watch and (self.now.hour, self.now.minute) < (16, 0):   # a first run after the close is too late to act on
             self.say("**Swing watchlist for " + self.today.strftime("%a %b %d") + "** (long only): an hourly close back "
                      "above the 21MA after a dip to it is the entry.\n"
                      + "\n".join("`%-5s` 21MA %s  (%s, %+.1f%% this week)%s" % (t, px(w["ma21"]), w["label"], w["wk"],
@@ -489,6 +489,8 @@ class Run:
                                                (last / tr["entry"] - 1) * 100.0,
                                                ", T%d hit" % tr["hits"] if tr["hits"] else ""))
             lines.append("Open swing alert trades: " + "; ".join(parts) + ".")
+        if not lines:
+            lines.append("Quiet day: no entries, no new Swing Screener setups and no open trades.")
         if lines:
             self.say("**Swing wrap, " + self.today.strftime("%a %b %d") + "**\n" + "\n".join(lines))
 
