@@ -1192,6 +1192,138 @@ def add_level_layers(fig, zones, price, y_lo, y_hi):
     return info
 
 # ==========================================
+# IMPLIED RANGE AND LIVE PLAN (Live Cockpit)
+# ==========================================
+def _daily_by_date(df):
+    """Daily closes keyed by plain date (Yahoo's daily index can carry a time zone)."""
+    if df is None or not len(df):
+        return pd.Series(dtype=float)
+    c = df["Close"].dropna()
+    ix = pd.DatetimeIndex(c.index)
+    if ix.tz is not None:
+        ix = ix.tz_localize(None)
+    return pd.Series(c.values.astype(float), index=ix.normalize())
+
+def implied_ranges(px_daily, vol_daily):
+    """The implied range for each session, fixed before it opens: the previous session's close +/- one day of the
+    previous session's volatility index (index / 100 / sqrt(252)). Returns a frame by session date with anchor, move,
+    lo, hi and that session's actual high, low and close."""
+    if px_daily is None or not len(px_daily):
+        return pd.DataFrame()
+    d = px_daily[["High", "Low", "Close"]].dropna().copy()
+    ix = pd.DatetimeIndex(d.index)
+    d.index = (ix.tz_localize(None) if ix.tz is not None else ix).normalize()
+    d = d[~d.index.duplicated(keep="last")]
+    v = _daily_by_date(vol_daily)
+    v = v[~v.index.duplicated(keep="last")]
+    out = []
+    for i in range(1, len(d)):
+        prev, day = d.index[i - 1], d.index[i]
+        vv = v[v.index <= prev]
+        if not len(vv):
+            continue
+        anchor, vol = float(d["Close"].iloc[i - 1]), float(vv.iloc[-1])
+        mv = anchor * vol / 100.0 / math.sqrt(252)
+        out.append(dict(date=day, anchor=anchor, vol=vol, move=mv, lo=anchor - mv, hi=anchor + mv,
+                        high=float(d["High"].iloc[i]), low=float(d["Low"].iloc[i]), close=float(d["Close"].iloc[i])))
+    return pd.DataFrame(out).set_index("date") if out else pd.DataFrame()
+
+def range_for_session(px_daily, vol_daily, session_date):
+    """Today's fixed range. If the session's own daily bar exists, it is anchored on the bar before it; before the
+    session has printed (SPX pre-market), on the last close."""
+    d = _daily_by_date(px_daily)
+    v = _daily_by_date(vol_daily)
+    if not len(d) or not len(v):
+        return None
+    sd = pd.Timestamp(session_date)
+    prior = d[d.index < sd]
+    if not len(prior):
+        return None
+    pv = v[v.index <= prior.index[-1]]
+    if not len(pv):
+        return None
+    anchor, vol = float(prior.iloc[-1]), float(pv.iloc[-1])
+    mv = anchor * vol / 100.0 / math.sqrt(252)
+    return dict(anchor=anchor, anchor_date=prior.index[-1], vol=vol, move=mv, lo=anchor - mv, hi=anchor + mv)
+
+def range_record(r, last_n=60):
+    """How the fixed range held up over the last `last_n` completed sessions."""
+    r = r.tail(last_n)
+    n = len(r)
+    if not n:
+        return None
+    up, dn = r["high"] > r["hi"], r["low"] < r["lo"]
+    inside = r["close"].between(r["lo"], r["hi"])
+    return dict(n=n, held=int((~up & ~dn).sum()), closed_in=int(inside.sum()), up=int(up.sum()), dn=int(dn.sum()),
+                up_back=int((up & inside).sum()), dn_back=int((dn & inside).sum()), both=int((up & dn).sum()))
+
+def plan_status(plan, bars, now_px):
+    """Where each of today's plan setups stands, from today's bars (5-minute, oldest first).
+
+    plan: rows with kind (LBAF, LAAF, Hold, Press), side (Long or Short), level and targets.
+    Look below / above and fail: a sweep through the level, then the first close back through it is the entry.
+    Hold / Press: price at or beyond the far side of the level (the open counts), then the first close through it.
+    A Hold is not taken once the same-side look below / above and fail has fired earlier, as on the Weekly Recap.
+    Returns one dict per setup: state (fired, waiting, armed, swept, open_past, blocked), entry, ts, pts, t1, t1_hit, note.
+    """
+    out = []
+    has = bars is not None and len(bars) > 0
+    for p in plan:
+        kind, X = p["kind"], float(p["level"])
+        is_long = p["side"] == "Long"
+        tg = p.get("targets") or []
+        t1 = tg[0] if tg else None
+        r = dict(p, is_long=is_long, t1=t1, state="waiting", entry=None, ts=None, pts=None, t1_hit=None, note="")
+        if not has:
+            r["note"] = "no prices yet today"
+            out.append(r)
+            continue
+        o = float(bars["Open"].iloc[0])
+        ent = None
+        if kind in ("LBAF", "LAAF"):
+            sup = kind == "LBAF"
+            if (sup and o < X) or ((not sup) and o > X):
+                r["state"], r["note"] = "open_past", ("opened below it: resistance today" if sup else "opened above it: support today")
+                out.append(r)
+                continue
+            rc = find_reclaim(bars, X, sup)
+            if rc is not None:
+                ent = (rc["ts"], float(rc["price"]))
+            else:
+                swept = (float(bars["Low"].min()) < X) if sup else (float(bars["High"].max()) > X)
+                if swept:
+                    ext = float(bars["Low"].min()) if sup else float(bars["High"].max())
+                    r["state"], r["note"] = "swept", "swept to %.0f, waiting for a close back %s %.0f" % (ext, "above" if sup else "below", X)
+                else:
+                    r["state"], r["note"] = "armed", "%.0f pts away" % abs(now_px - X)
+        else:
+            armed = False
+            for ts, b in bars.iterrows():
+                if not armed and ((float(b["Low"]) <= X) if is_long else (float(b["High"]) >= X)):
+                    armed = True
+                if armed and ((float(b["Close"]) > X) if is_long else (float(b["Close"]) < X)):
+                    ent = (ts, float(b["Close"]))
+                    break
+            if ent is None:
+                r["note"] = ("needs a 5-minute close %s %.0f, %.0f pts away" % ("above" if is_long else "below", X, abs(now_px - X))
+                             if armed else "price has not been back to it since the open")
+        if ent is not None:
+            r["state"], r["ts"], r["entry"] = "fired", ent[0], ent[1]
+            r["pts"] = (now_px - ent[1]) if is_long else (ent[1] - now_px)
+            after = bars[bars.index > ent[0]]
+            if t1 is not None:
+                r["t1_hit"] = bool(len(after)) and bool((after["High"] >= t1).any() if is_long else (after["Low"] <= t1).any())
+        out.append(r)
+    # the hold rule: a look below / above and fail that fired first rules out the same-side hold
+    for r in out:
+        if r["kind"] == "Hold" and r["state"] == "fired":
+            rev = "LBAF" if r["is_long"] else "LAAF"
+            if any(q["kind"] == rev and q["state"] == "fired" and q["ts"] < r["ts"] for q in out):
+                r["state"], r["note"] = "blocked", "not taken: the look %s and fail fired first" % ("below" if r["is_long"] else "above")
+                r["entry"] = r["pts"] = r["t1_hit"] = None
+    return out
+
+# ==========================================
 # 2. SIDEBAR NAVIGATION ROUTER
 # ==========================================
 st.sidebar.title("🧭 Navigation")
@@ -1232,6 +1364,36 @@ if page_selection == "Live Cockpit":
     else: api_interval, api_period = "1d", "3mo"
 
     st.title("Next Step Trading: Daily Live Cockpit (" + asset_label + ")")
+    try:
+        _code = st.secrets.get("SCREENER_PASSCODE", None)
+    except Exception:
+        _code = None
+    operator = bool(_code) and (st.sidebar.text_input("Operator passcode", type="password", key="scr_pass") == _code)
+
+    # The session these numbers are for: today on a weekday; ES after 6 PM ET belongs to the next day's session.
+    _now_et = pd.Timestamp.now(tz="US/Eastern")
+    _sd = _now_et.normalize().tz_localize(None)
+    if active_ticker.endswith("=F") and _now_et.hour >= 18:
+        _sd = _sd + pd.Timedelta(days=1)
+    while _sd.weekday() >= 5:
+        _sd = _sd + pd.Timedelta(days=1) if (active_ticker.endswith("=F") and _sd.weekday() == 6 and _now_et.hour >= 18) \
+            else _sd - pd.Timedelta(days=1)
+    session_date = _sd.date()
+
+    @st.cache_data(ttl=1800)
+    def get_range_data(ticker):
+        """A year of daily bars for the product, VIX and VIX1D: the inputs of the fixed implied range and its record."""
+        return (fetch_history(ticker, period="1y", interval="1d"), fetch_history("^VIX", period="1y", interval="1d"),
+                fetch_history("^VIX1D", period="1y", interval="1d"))
+
+    @st.cache_data(ttl=55)
+    def get_bars_5m(ticker):
+        h = fetch_history(ticker, period="2d", interval="5m")
+        try:
+            h.index = h.index.tz_convert("US/Eastern")
+        except (TypeError, AttributeError):
+            pass
+        return h
 
     # ---- Data fetch ----
     @st.cache_data(ttl=50)
@@ -1300,26 +1462,24 @@ if page_selection == "Live Cockpit":
 
     latest_price = float(df_main['Close'].iloc[-1])
     latest_vix = float(df_vix['Close'].iloc[-1]) if not df_vix.empty else 15.0
-    daily_pct_move = (latest_vix / math.sqrt(252)) / 100
-    expected_move_points = latest_price * daily_pct_move
-    em_upper, em_lower = latest_price + expected_move_points, latest_price - expected_move_points
+    # The implied range is fixed for the session: the prior close +/- one day of the prior close's VIX. It does not
+    # move with price, so its high and low can be traded (or sold) as levels and its record measured.
+    try:
+        rd_px, rd_vix, rd_vix1d = get_range_data(active_ticker)
+    except Exception:
+        rd_px = rd_vix = rd_vix1d = None
+    rng = range_for_session(rd_px, rd_vix, session_date) if rd_px is not None else None
+    if rng is not None:
+        expected_move_points, em_upper, em_lower = rng["move"], rng["hi"], rng["lo"]
+    else:                                   # no daily history right now: fall back to a band around the last price
+        expected_move_points = latest_price * (latest_vix / math.sqrt(252)) / 100
+        em_upper, em_lower = latest_price + expected_move_points, latest_price - expected_move_points
 
     # Change vs prior daily close
     chg_pct = None
     try:
         if len(df_1d) >= 2:
             chg_pct = (latest_price / float(df_1d['Close'].iloc[-2]) - 1.0) * 100.0
-    except Exception:
-        pass
-
-    # Realized range today vs implied range
-    range_used = None
-    try:
-        last_day = df_15m.index[-1].date()
-        today_df = df_15m[[d.date() == last_day for d in df_15m.index]]
-        t_high, t_low = float(today_df['High'].max()), float(today_df['Low'].min())
-        if expected_move_points > 0:
-            range_used = (t_high - t_low) / (2 * expected_move_points) * 100.0
     except Exception:
         pass
 
@@ -1334,13 +1494,37 @@ if page_selection == "Live Cockpit":
     vit = tile(asset_label + " (Live)", "{:,.2f}".format(latest_price),
                ("" if chg_pct is None else "{:+.2f}% vs prior close".format(chg_pct)), price_color)
     vit += tile("Volatility Index (VIX)", "{:.2f}".format(latest_vix), "drives the implied range")
-    vit += tile("Implied Daily Move", "± {:.1f} pts".format(expected_move_points),
-                "{:,.0f} – {:,.0f}".format(em_lower, em_upper))
-    if range_used is not None:
-        ru_color = GREEN if range_used < 80 else (AMBER if range_used < 110 else RED)
-        vit += tile("Range Used Today", "{:.0f}%".format(range_used), "of the implied range", ru_color)
-    if basis is not None:
-        vit += tile("ES – SPX Basis", "{:+.1f}".format(basis), "add to SPX levels for ES", BLUE)
+    if rng is not None:
+        vit += tile("Implied Range Today", "{:.0f} – {:.0f}".format(em_lower, em_upper),
+                    "± {:.0f} pts, fixed from {}'s close {:.0f} (VIX {:.1f})".format(
+                        expected_move_points, rng["anchor_date"].strftime("%a"), rng["anchor"], rng["vol"]))
+    else:
+        vit += tile("Implied Daily Move", "± {:.1f} pts".format(expected_move_points),
+                    "{:.0f} – {:.0f} (around the last price)".format(em_lower, em_upper))
+    if latest_price > em_upper:
+        vit += tile("Room In The Range", "Above the high", "{:.0f} pts over {:.0f}".format(latest_price - em_upper, em_upper), RED)
+    elif latest_price < em_lower:
+        vit += tile("Room In The Range", "Below the low", "{:.0f} pts under {:.0f}".format(em_lower - latest_price, em_lower), RED)
+    else:
+        vit += tile("Room In The Range", "▲ {:.0f} · ▼ {:.0f}".format(em_upper - latest_price, latest_price - em_lower),
+                    "pts to the implied high / low")
+    # regime: the 8 / 21 EMA read off the last settled daily close, and where price is now against those averages
+    try:
+        _d1 = _daily_by_date(df_1d)
+        _d1 = _d1[_d1.index < pd.Timestamp(session_date)]
+        if len(_d1) >= 30:
+            _c, _e8 = float(_d1.iloc[-1]), float(_d1.ewm(span=8, adjust=False).mean().iloc[-1])
+            _e21 = float(_d1.ewm(span=21, adjust=False).mean().iloc[-1])
+            def _reg(x_):
+                return ("Bearish", RED) if x_ < _e21 else (("Bearish lean", AMBER) if x_ < _e8 else ("Bullish", GREEN))
+            _rg, _rc = _reg(_c)
+            _lv, _lc = _reg(latest_price)
+            vit += tile("Regime (8 / 21 EMA)", _rg, "at {}'s close · now {}{}".format(
+                _d1.index[-1].strftime("%a"), _lv.lower(), "" if _lv == _rg else " if it closes here"), _rc)
+    except Exception:
+        pass
+    if operator and basis is not None:
+        vit += tile("ES – SPX Basis", "{:+.1f}".format(basis), "operator: add to SPX levels for ES", BLUE)
 
     imp = get_implied_spx_open()
     if imp is not None and abs(imp["gap"]) >= 0.5:
@@ -1350,6 +1534,25 @@ if page_selection == "Live Cockpit":
                                                                imp["asof"].strftime("%a"), imp["close"]),
                     gap_col)
     st.markdown("<div class='ns-row'>" + vit + "</div>", unsafe_allow_html=True)
+
+    # ---- How the fixed range has held up (operator only for now) ----
+    if operator and rd_px is not None:
+        _rec = range_record(implied_ranges(rd_px, rd_vix), 60)
+        _rec1 = range_record(implied_ranges(rd_px, rd_vix1d), 60) if rd_vix1d is not None and len(rd_vix1d) else None
+        if _rec:
+            with st.expander("📏 How the implied range has held up: last %d sessions (operator)" % _rec["n"]):
+                def _pc(k_, R_):
+                    return "%d of %d (%.0f%%)" % (R_[k_], R_["n"], R_[k_] / R_["n"] * 100.0)
+                tl_ = tile("High and low stayed inside", _pc("held", _rec), "a short strangle / iron condor at the range kept its strikes")
+                tl_ += tile("Closed inside", _pc("closed_in", _rec), "finished between the implied high and low")
+                tl_ += tile("Broke the high", str(_rec["up"]), "%d closed back inside" % _rec["up_back"], AMBER)
+                tl_ += tile("Broke the low", str(_rec["dn"]), "%d closed back inside" % _rec["dn_back"], AMBER)
+                st.markdown("<div class='ns-row'>" + tl_ + "</div>", unsafe_allow_html=True)
+                st.markdown("<p style='color:" + MUTED + ";font-size:12.5px;margin:6px 2px 0 2px;'>Each session's range is the prior close "
+                            "± that close's VIX ÷ 100 ÷ √252, set before the session opens and never moved. "
+                            + ("With VIX1D (the one-day index) instead: high and low inside %s, closed inside %s. " % (
+                                _pc("held", _rec1), _pc("closed_in", _rec1)) if _rec1 else "")
+                            + "A break that closes back inside is a fade; one that does not is a trend day.</p>", unsafe_allow_html=True)
     st.divider()
 
     # ---- Published levels from sheet ----
@@ -1414,6 +1617,96 @@ if page_selection == "Live Cockpit":
                         + ". A support above the open acts as resistance at the bell, and a resistance "
                           "below it acts as support.</span></div>", unsafe_allow_html=True)
 
+    # ---- Today's plan, live: the published setups and where each one stands ----
+    try:
+        _ps = pd.read_csv(SETUPS_SHEET_URL)
+        _ps = _ps[_ps["Ticker"].astype(str).str.strip() == active_ticker].copy()
+        _ps["_dt"] = parse_date_col(_ps["Date"]).dt.normalize()
+        _ps = _ps[_ps["_dt"] == pd.Timestamp(session_date)]
+    except Exception:
+        _ps = pd.DataFrame()
+    _plan = []
+    for _, _r in _ps.iterrows():
+        try:
+            _plan.append(dict(kind=str(_r["Kind"]).strip().upper().replace("HOLD", "Hold").replace("PRESS", "Press"),
+                              side="Long" if str(_r["Side"]).strip().lower().startswith("l") else "Short",
+                              level=float(_r["Level"]),
+                              targets=[float(x_) for x_ in re.findall(r"\d+(?:\.\d+)?", str(_r.get("Targets", "")))]
+                              if pd.notna(_r.get("Targets")) else []))
+        except Exception:
+            continue
+    # nearest published levels above and below price
+    _near = ""
+    if not filtered_levels.empty:
+        _mids = []
+        for _, _r in filtered_levels.iterrows():
+            try:
+                _b, _t = sorted((float(_r["Bottom"]), float(_r["Top"])))
+            except Exception:
+                continue
+            _mids.append((_b, _t, clean_str(_r.get("Label"))))
+        _ab = sorted([m_ for m_ in _mids if m_[0] > latest_price], key=lambda m_: m_[0])
+        _be = sorted([m_ for m_ in _mids if m_[1] < latest_price], key=lambda m_: -m_[1])
+        _in = [m_ for m_ in _mids if m_[0] <= latest_price <= m_[1]]
+        def _nm(m_):
+            return ("{:.0f}".format(m_[0]) if abs(m_[1] - m_[0]) < 0.5 else "{:.0f} to {:.0f}".format(m_[0], m_[1])) \
+                + (" (" + m_[2] + ")" if m_[2] else "")
+        _bits = []
+        if _ab:
+            _bits.append("▲ <strong>" + _nm(_ab[0]) + "</strong> <span style='color:" + MUTED + ";'>+{:.0f}</span>".format(_ab[0][0] - latest_price))
+        if _in:
+            _bits.append("inside <strong>" + _nm(_in[0]) + "</strong>")
+        if _be:
+            _bits.append("▼ <strong>" + _nm(_be[0]) + "</strong> <span style='color:" + MUTED + ";'>-{:.0f}</span>".format(latest_price - _be[0][1]))
+        _near = " &nbsp;·&nbsp; ".join(_bits)
+    if _plan or _near:
+        st.markdown("<div class='ns-section' style='margin-top:14px;'>📋 Today's Plan, Live (" + asset_label + ")</div>",
+                    unsafe_allow_html=True)
+        if _near:
+            st.markdown("<div class='ns-panel' style='font-size:15px;color:" + TEXT + ";'><span style='color:" + MUTED
+                        + ";font-size:12px;text-transform:uppercase;letter-spacing:0.8px;'>Nearest levels to "
+                        + "{:.0f}".format(latest_price) + "</span>&nbsp;&nbsp; " + _near + "</div>", unsafe_allow_html=True)
+    if _plan:
+        try:
+            _b5 = get_bars_5m(active_ticker)
+            _b5 = _b5[_b5.index.date == session_date]
+        except Exception:
+            _b5 = None
+        _st = plan_status(_plan, _b5, latest_price)
+        _kind_txt = {"LBAF": "Look below and fail", "LAAF": "Look above and fail"}
+        _order = {"fired": 0, "swept": 1, "armed": 2, "waiting": 3, "open_past": 4, "blocked": 5}
+        _rows = ""
+        for r_ in sorted(_st, key=lambda r_: (not r_["is_long"], _order.get(r_["state"], 9),
+                                              r_["ts"].value if r_["ts"] is not None else r_["level"])):
+            name_ = _kind_txt.get(r_["kind"]) or (r_["kind"] + (" above" if r_["is_long"] else " below"))
+            col_ = GREEN if r_["is_long"] else RED
+            if r_["state"] == "fired":
+                badge = ("<span style='color:" + GREEN + ";font-weight:700;'>FIRED</span> "
+                         + (r_["ts"] + pd.Timedelta(minutes=5)).strftime("%H:%M") + " at {:.0f}".format(r_["entry"]))
+                pts_ = ("<span style='font-weight:700;color:" + (GREEN if r_["pts"] >= 0 else RED) + ";'>{:+.0f}</span>".format(r_["pts"]))
+            else:
+                lab_ = {"swept": ("SWEPT", AMBER), "armed": ("ARMED", BLUE), "waiting": ("WAITING", MUTED),
+                        "open_past": ("NOT IN PLAY", MUTED), "blocked": ("NOT TAKEN", MUTED)}[r_["state"]]
+                badge = "<span style='color:" + lab_[1] + ";font-weight:700;'>" + lab_[0] + "</span> " + r_["note"]
+                pts_ = "<span style='color:" + MUTED + ";'>-</span>"
+            t1_ = "-" if r_["t1"] is None else ("{:.0f}".format(r_["t1"]) + (
+                " <span style='color:" + GREEN + ";'>hit</span>" if r_["t1_hit"] else ""))
+            _rows += ("<tr><td style='color:" + col_ + ";font-weight:600;'>" + name_ + "</td><td>" + "{:.0f}".format(r_["level"])
+                      + "</td><td>" + badge + "</td><td style='text-align:right;'>" + pts_ + "</td><td style='text-align:right;'>"
+                      + t1_ + "</td></tr>")
+        st.markdown("<style>.pl{width:100%;border-collapse:collapse;background:#151b26;border:1px solid #232c3d;font-size:14px;}"
+                    ".pl th{font-size:11.5px;text-transform:uppercase;letter-spacing:0.8px;color:#a8b6c6;padding:9px 12px;"
+                    "border-bottom:1px solid #232c3d;font-weight:600;text-align:left;}.pl td{padding:8px 12px;"
+                    "border-bottom:1px solid #1c2434;color:#e6edf3;}</style><table class='pl'><tr><th>Setup</th><th>Level</th>"
+                    "<th>Status</th><th style='text-align:right;'>Points now</th><th style='text-align:right;'>T1</th></tr>"
+                    + _rows + "</table><p style='color:" + MUTED + ";font-size:12.5px;margin:6px 2px 0 2px;'>From today's "
+                    "published plan, on 5-minute bars. Look below / above and fail fires on the first close back through the "
+                    "level after a sweep; Hold and Press on the first close through it. A Hold is not taken once the "
+                    "same-side look below / above and fail has fired. Points run from the entry to the last price.</p>",
+                    unsafe_allow_html=True)
+    elif not filtered_levels.empty and levels_asof is not None and levels_asof.date() == session_date:
+        st.caption("No trade setups were imported with today's levels, so the live plan is empty.")
+
     # ---- MenthorQ dealer levels ----
     active_mq_url = MQ_ES_SHEET_URL if active_ticker == "ES=F" else MQ_SPX_SHEET_URL
     mq_dict = {}
@@ -1441,7 +1734,7 @@ if page_selection == "Live Cockpit":
     range_low = next((v for k, v in mq_dict.items() if "1D Min" in k), None)
 
     # ---- Dealer Proximity Radar (HTML, matches Swing Book ladder language) ----
-    if call_res and put_sup:
+    if operator and call_res and put_sup:       # needs MenthorQ levels entered by hand each day: operator only
         st.markdown("<div class='ns-section'>🎯 Dealer Proximity Radar (" + asset_label + ")</div>", unsafe_allow_html=True)
 
         marks = [("1D Min", range_low, MUTED), ("0DTE Put", dte_put, GREEN), ("Put Support", put_sup, GREEN),
@@ -1552,7 +1845,7 @@ if page_selection == "Live Cockpit":
     except Exception:
         x_range = None
 
-    for y_val, tag in [(em_upper, "+1 SD"), (em_lower, "-1 SD")]:
+    for y_val, tag in [(em_upper, "Implied high"), (em_lower, "Implied low")]:
         fig.add_hline(y=y_val, line_dash="dash", line_color="#00BFFF", line_width=1.2)
         fig.add_annotation(xref="paper", x=0.995, y=y_val, xanchor="right", yanchor="middle", text=tag,
                            showarrow=False, font=dict(color="white", size=12), bgcolor="#00BFFF", borderpad=3)
