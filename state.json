@@ -1,21 +1,12 @@
 {
  "trades": [],
  "day": {
-  "date": "2026-11-12",
+  "date": "2026-11-13",
   "watch": {
    "TSLA": {
-    "ma21": 380.53,
-    "wk": 8.5,
+    "ma21": 382.06,
+    "wk": 10.3,
     "label": "At the 21MA now",
-    "armed": false,
-    "zone_sent": false,
-    "entered": false,
-    "fail_note": null
-   },
-   "LLY": {
-    "ma21": 1339.95,
-    "wk": 5.3,
-    "label": "Extended",
     "armed": false,
     "zone_sent": false,
     "entered": false,
