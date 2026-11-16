@@ -3,3 +3,4 @@ date,ticker,event,ts,price,ma21,note
 2026-11-10,TSLA,reclaim_rejected,2026-11-10 16:30:00-05:00,379.8,379.47,Reward to risk below the minimum
 2026-11-16,COP,in_zone,2026-11-16 09:30:00-05:00,138.83,140.65,
 2026-11-16,TSLA,in_zone,2026-11-16 09:30:00-05:00,376.18,382.81,
+2026-11-16,COP,reclaim_rejected,2026-11-16 11:30:00-05:00,140.85,140.65,Reward to risk below the minimum
