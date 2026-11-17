@@ -1,30 +1,39 @@
 {
  "trades": [],
  "day": {
-  "date": "2026-11-16",
+  "date": "2026-11-17",
   "watch": {
-   "TSLA": {
-    "ma21": 382.81,
-    "wk": 8.3,
-    "label": "At the 21MA now",
-    "armed": true,
-    "zone_sent": true,
+   "PG": {
+    "ma21": 163.81,
+    "wk": 0.5,
+    "label": "Above the 21MA",
+    "armed": false,
+    "zone_sent": false,
     "entered": false,
     "fail_note": null
    },
    "COP": {
-    "ma21": 140.65,
-    "wk": 6.0,
+    "ma21": 139.8,
+    "wk": 0.3,
     "label": "At the 21MA now",
-    "armed": true,
-    "zone_sent": true,
+    "armed": false,
+    "zone_sent": false,
     "entered": false,
-    "fail_note": "Reward to risk below the minimum"
+    "fail_note": null
    },
-   "LLY": {
-    "ma21": 1355.1,
-    "wk": 5.8,
+   "COST": {
+    "ma21": 1041.71,
+    "wk": 0.2,
     "label": "Extended",
+    "armed": false,
+    "zone_sent": false,
+    "entered": false,
+    "fail_note": null
+   },
+   "UNH": {
+    "ma21": 403.0,
+    "wk": 0.0,
+    "label": "At the 21MA now",
     "armed": false,
     "zone_sent": false,
     "entered": false,
