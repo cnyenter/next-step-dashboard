@@ -1,11 +1,11 @@
 {
  "trades": [],
  "day": {
-  "date": "2026-11-17",
+  "date": "2026-11-18",
   "watch": {
-   "PG": {
-    "ma21": 163.81,
-    "wk": 0.5,
+   "COST": {
+    "ma21": 1047.92,
+    "wk": 4.1,
     "label": "Above the 21MA",
     "armed": false,
     "zone_sent": false,
@@ -13,29 +13,29 @@
     "fail_note": null
    },
    "COP": {
-    "ma21": 139.8,
-    "wk": 0.3,
-    "label": "At the 21MA now",
-    "armed": true,
-    "zone_sent": true,
-    "entered": false,
-    "fail_note": null
-   },
-   "COST": {
-    "ma21": 1041.71,
-    "wk": 0.2,
-    "label": "Extended",
+    "ma21": 139.77,
+    "wk": 3.5,
+    "label": "Under the 21MA",
     "armed": false,
     "zone_sent": false,
     "entered": false,
     "fail_note": null
    },
-   "UNH": {
-    "ma21": 403.0,
-    "wk": 0.0,
-    "label": "At the 21MA now",
-    "armed": true,
-    "zone_sent": true,
+   "CVX": {
+    "ma21": 218.45,
+    "wk": 2.3,
+    "label": "Under the 21MA",
+    "armed": false,
+    "zone_sent": false,
+    "entered": false,
+    "fail_note": null
+   },
+   "KO": {
+    "ma21": 95.48,
+    "wk": 1.9,
+    "label": "Above the 21MA",
+    "armed": false,
+    "zone_sent": false,
     "entered": false,
     "fail_note": null
    }
