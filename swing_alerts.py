@@ -179,20 +179,17 @@ def settled(df, today):
 
 
 def week_leaders(R, daily, today):
-    """The Weekly Recap's leaders: biggest gain from this week's Monday open to yesterday's close.
-    On a Monday (nothing settled yet this week) it is last week's leaders."""
-    monday = pd.Timestamp(today) - pd.Timedelta(days=pd.Timestamp(today).weekday())
-    if pd.Timestamp(today) == monday:
-        monday = monday - pd.Timedelta(days=7)
+    """The Pullback Watchlist's leaders, as the Weekly Recap ranks them: the biggest gain over the last five settled
+    sessions (yesterday's close against the close five sessions before), so the list means as much on a Tuesday
+    as on a Friday."""
     chg = {}
     for t in R["WATCHLIST"]:
         df = daily.get(t)
         if df is None:
             continue
-        wk = settled(df, today)
-        wk = wk[wk.index >= monday]
-        if len(wk):
-            chg[t] = (float(wk["Close"].iloc[-1]) / float(wk["Open"].iloc[0]) - 1.0) * 100.0
+        c = settled(df, today)["Close"].dropna()
+        if len(c) >= 6:
+            chg[t] = (float(c.iloc[-1]) / float(c.iloc[-6]) - 1.0) * 100.0
     return sorted(chg.items(), key=lambda kv: -kv[1])[:WATCH_TOP]
 
 
@@ -281,7 +278,8 @@ class Run:
         def line(t, w):
             p_ = now_px(t)
             where = "" if p_ is None else "now %s (%+.1f%% vs 21MA) · " % (px(p_), (p_ / w["ma21"] - 1.0) * 100.0)
-            return "`%-5s` %s21MA %s · %s, %+.1f%% this week%s" % (t, where, px(w["ma21"]), w["label"], w["wk"],
+            return "`%-5s` %s21MA %s · %s, %+.1f%% %s%s" % (t, where, px(w["ma21"]), w["label"], w["wk"],
+                                                       "over 5 days",
                                                                  "  · already in a trade" if t in held else "")
         if watch and (self.now.hour, self.now.minute) < (16, 0):   # a first run after the close is too late to act on
             self.say("**Swing watchlist for " + self.today.strftime("%a %b %d") + "** (long only): an hourly close back "
@@ -502,8 +500,24 @@ class Run:
                                                px(last), (last / tr["entry"] - 1) * 100.0, px(tr["entry"]),
                                                ", T%d hit" % tr["hits"] if tr["hits"] else ""))
             lines.append("Open swing alert trades: " + "; ".join(parts) + ".")
-        if not lines:
-            lines.append("Quiet day: no entries, no new Swing Screener setups and no open trades.")
+        # how each watchlist name behaved today, so a quiet day still shows what was close
+        wl = (self.state.get("day") or {}).get("watch", {})
+        if wl:
+            bits = []
+            for t, w in wl.items():
+                if w.get("entered"):
+                    bits.append(t + ": entered")
+                elif any(x["t"] == t and x["status"] != "closed" for x in self.state["trades"]):
+                    bits.append(t + ": already in a trade")
+                elif w.get("fail_note"):
+                    bits.append(t + ": reclaimed the 21MA, but " + w["fail_note"].lower())
+                elif w.get("armed"):
+                    bits.append(t + ": dipped to the 21MA, no hourly close back above")
+                else:
+                    bits.append(t + ": did not reach the 21MA")
+            lines.append("Watchlist today: " + "; ".join(bits) + ".")
+        if not [l_ for l_ in lines if not l_.startswith("Watchlist today")]:
+            lines.insert(0, "Quiet day: no entries, no new Swing Screener setups and no open trades.")
         if lines:
             self.say("**Swing wrap, " + self.today.strftime("%a %b %d") + "**\n" + "\n".join(lines))
 
