@@ -16,8 +16,8 @@
     "ma21": 139.77,
     "wk": 3.5,
     "label": "Under the 21MA",
-    "armed": false,
-    "zone_sent": false,
+    "armed": true,
+    "zone_sent": true,
     "entered": false,
     "fail_note": null
    },
@@ -25,8 +25,8 @@
     "ma21": 218.45,
     "wk": 2.3,
     "label": "Under the 21MA",
-    "armed": false,
-    "zone_sent": false,
+    "armed": true,
+    "zone_sent": true,
     "entered": false,
     "fail_note": null
    },
@@ -45,10 +45,12 @@
  "processed": {
   "LLY": "2026-11-16 15:30:00-05:00",
   "TSLA": "2026-11-16 15:30:00-05:00",
-  "COP": "2026-11-17 15:30:00-05:00",
-  "COST": "2026-11-17 15:30:00-05:00",
+  "COP": "2026-11-18 09:30:00-05:00",
+  "COST": "2026-11-18 09:30:00-05:00",
   "PG": "2026-11-17 15:30:00-05:00",
-  "UNH": "2026-11-17 15:30:00-05:00"
+  "UNH": "2026-11-17 15:30:00-05:00",
+  "CVX": "2026-11-18 09:30:00-05:00",
+  "KO": "2026-11-18 09:30:00-05:00"
  },
  "pending": []
 }
