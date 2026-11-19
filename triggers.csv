@@ -11,3 +11,5 @@ date,ticker,event,ts,price,ma21,note
 2026-11-19,CME,screener_filled,2026-11-19 09:30:00-05:00,308.58,,
 2026-11-19,ICE,screener_filled,2026-11-19 09:30:00-05:00,172.2,,
 2026-11-19,NDAQ,screener_filled,2026-11-19 09:30:00-05:00,105.47,,
+2026-11-19,WMT,in_zone,2026-11-19 09:30:00-05:00,123.29,123.96,
+2026-11-19,WMT,reclaim_rejected,2026-11-19 10:30:00-05:00,125.68,123.96,Reward to risk below the minimum
