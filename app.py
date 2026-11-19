@@ -3503,14 +3503,16 @@ elif page_selection == "Weekly Recap":
             _grp[k_] = dict(s_, levels=[s_])
     moves = list(_grp.values())
 
-    if tested:
-        worked = held + n_rev
-        tiles += tile("Levels Worked", "%d of %d" % (worked, tested),
-                      "held, rejected, or swept and reclaimed",
-                      GREEN if worked >= tested * 0.6 else AMBER)
-        if setups:
-            tiles += tile("Setups Fired", str(len(moves)),
-                          "fails, holds and presses", AMBER)
+    # One tile for the week's setups: how many fired, how many closed the day in profit and the net points. The level
+    # by level grading (held, rejected, broke) stays in the operator's graded grid below.
+    if moves:
+        _pp_t = [m_["pts"] for m_ in moves if m_["pts"] is not None]
+        _won_t = sum(1 for v in _pp_t if v > 0)
+        tiles += tile("Setups", "%d of %d in profit" % (_won_t, len(moves)),
+                      "{:+.0f} pts net · fails, holds and presses".format(sum(_pp_t)),
+                      GREEN if sum(_pp_t) > 0 else RED)
+    elif tested or graded_rows:
+        tiles += tile("Setups", "none yet", "no plan setup has fired this week", MUTED)
     st.markdown("<div class='ns-row'>" + tiles + "</div>", unsafe_allow_html=True)
     map_ph = st.container()     # "The map for next week" is filled in below, once the levels and time at price are known
     st.divider()
