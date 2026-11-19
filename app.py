@@ -3535,11 +3535,13 @@ elif page_selection == "Weekly Recap":
                 nm = ("{:.0f}".format(zb) if abs(zt - zb) < 0.5 else "{:.0f} to {:.0f}".format(zb, zt))
                 names.append(nm + (" (" + s_["lbl"] + ")" if s_["lbl"] else "") + ("*" if s_["flipped"] else ""))
             if m_["reclaim"] is not None:
-                rc_txt = ("{:.0f}".format(m_["reclaim"]["price"]) + " <span style='color:" + MUTED + ";font-size:11.5px;'>"
-                          + (m_["reclaim"]["ts"] + pd.Timedelta(minutes=5)).strftime("%H:%M") + "</span>")   # the bar's close, when the entry fills
+                rc_txt = "{:.0f}".format(m_["reclaim"]["price"])
+                # the bar's close, when the entry fills, in Eastern time
+                tm_txt = (m_["reclaim"]["ts"] + pd.Timedelta(minutes=5)).strftime("%H:%M")
             else:
-                rc_txt = "-"
+                rc_txt = tm_txt = "-"
             rows_html += ("<tr><td style='color:" + MUTED + ";'>" + m_["day"].strftime("%a") + "</td>"
+                          "<td style='font-weight:600;'>" + tm_txt + "</td>"
                           "<td style='font-weight:600;color:" + (GREEN if m_["sup"] else RED) + ";'>" + kind + "</td>"
                           "<td>" + ", ".join(names) + "</td>"
                           "<td style='text-align:right;color:" + MUTED + ";'>" + ("{:.0f}".format(m_["extreme"]) if m_["extreme"] is not None else "-") + "</td>"
@@ -3558,7 +3560,7 @@ elif page_selection == "Weekly Recap":
                     "Hold and Press (from the plan): entry is the first 5-minute close through the level. Points run to the day's close; "
                     "levels taken out by the same move are one setup.</p>", unsafe_allow_html=True)
         st.markdown("<table class='ns-tbl'><tr>"
-                    "<th style='text-align:left;'>Day</th><th style='text-align:left;'>Setup</th>"
+                    "<th style='text-align:left;'>Day</th><th style='text-align:left;'>Fired (ET)</th><th style='text-align:left;'>Setup</th>"
                     "<th style='text-align:left;'>Level</th><th style='text-align:right;'>Swept to</th>"
                     "<th style='text-align:right;'>Entry</th>"
                     "<th style='text-align:right;'>Close</th><th style='text-align:right;'>Points</th>"
