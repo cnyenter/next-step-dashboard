@@ -1,39 +1,103 @@
 {
- "trades": [],
+ "trades": [
+  {
+   "t": "CME",
+   "entry": 308.5849914550781,
+   "entry_ts": "2026-11-19 09:29:00-05:00",
+   "entry_day": "2026-11-19",
+   "stop": 299.0770866394043,
+   "stop_now": 299.0770866394043,
+   "targets": [
+    338.4,
+    360.03,
+    383.91
+   ],
+   "hits": 0,
+   "sold": 0.0,
+   "legs": [],
+   "status": "open",
+   "source": "screener"
+  },
+  {
+   "t": "ICE",
+   "entry": 172.19500732421875,
+   "entry_ts": "2026-11-19 09:29:00-05:00",
+   "entry_day": "2026-11-19",
+   "stop": 167.85649696350097,
+   "stop_now": 167.85649696350097,
+   "targets": [
+    190.6,
+    202.32,
+    215.26
+   ],
+   "hits": 0,
+   "sold": 0.0,
+   "legs": [],
+   "status": "open",
+   "source": "screener"
+  },
+  {
+   "t": "NDAQ",
+   "entry": 105.47000122070312,
+   "entry_ts": "2026-11-19 09:29:00-05:00",
+   "entry_day": "2026-11-19",
+   "stop": 103.4401990890503,
+   "stop_now": 103.4401990890503,
+   "targets": [
+    111.45,
+    117.84,
+    125.98
+   ],
+   "hits": 0,
+   "sold": 0.0,
+   "legs": [],
+   "status": "open",
+   "source": "screener"
+  }
+ ],
  "day": {
-  "date": "2026-11-18",
+  "date": "2026-11-19",
   "watch": {
-   "COST": {
-    "ma21": 1047.92,
-    "wk": 4.1,
+   "DIS": {
+    "ma21": 115.83,
+    "wk": 2.3,
     "label": "Above the 21MA",
     "armed": false,
     "zone_sent": false,
     "entered": false,
     "fail_note": null
    },
-   "COP": {
-    "ma21": 139.77,
-    "wk": 3.5,
-    "label": "Under the 21MA",
-    "armed": true,
-    "zone_sent": true,
-    "entered": false,
-    "fail_note": null
-   },
-   "CVX": {
-    "ma21": 218.45,
-    "wk": 2.3,
-    "label": "Under the 21MA",
-    "armed": true,
-    "zone_sent": true,
-    "entered": false,
-    "fail_note": null
-   },
-   "KO": {
-    "ma21": 95.48,
-    "wk": 1.9,
+   "PG": {
+    "ma21": 165.05,
+    "wk": 1.6,
     "label": "Above the 21MA",
+    "armed": false,
+    "zone_sent": false,
+    "entered": false,
+    "fail_note": null
+   },
+   "WMT": {
+    "ma21": 123.96,
+    "wk": 1.3,
+    "label": "Above the 21MA",
+    "armed": false,
+    "zone_sent": false,
+    "entered": false,
+    "fail_note": null
+   },
+   "COST": {
+    "ma21": 1052.35,
+    "wk": 0.8,
+    "label": "Above the 21MA",
+    "armed": false,
+    "zone_sent": false,
+    "entered": false,
+    "fail_note": null
+   },
+   "AMZN": {
+    "ma21": 259.74,
+    "wk": 0.6,
+    "label": "At the 21MA now",
     "armed": false,
     "zone_sent": false,
     "entered": false,
@@ -52,48 +116,5 @@
   "CVX": "2026-11-18 15:30:00-05:00",
   "KO": "2026-11-18 15:30:00-05:00"
  },
- "pending": [
-  {
-   "t": "CME",
-   "day": "2026-11-18",
-   "px": 310.25,
-   "stop": 299.0770866394043,
-   "tg": [
-    338.4,
-    360.03,
-    383.91
-   ],
-   "lo": 304.2445829119001,
-   "hi": 312.1847244262695,
-   "sec": "Capital Markets"
-  },
-  {
-   "t": "ICE",
-   "day": "2026-11-18",
-   "px": 171.80999755859375,
-   "stop": 167.85649696350097,
-   "tg": [
-    190.6,
-    202.32,
-    215.26
-   ],
-   "lo": 171.10614246913366,
-   "hi": 175.43766464233397,
-   "sec": "Capital Markets"
-  },
-  {
-   "t": "NDAQ",
-   "day": "2026-11-18",
-   "px": 105.72000122070312,
-   "stop": 103.4401990890503,
-   "tg": [
-    111.45,
-    117.84,
-    125.98
-   ],
-   "lo": 105.20082438332695,
-   "hi": 106.11013272603354,
-   "sec": "Capital Markets"
-  }
- ]
+ "pending": []
 }
