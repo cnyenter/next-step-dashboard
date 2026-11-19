@@ -14,3 +14,5 @@ date,ticker,event,ts,price,ma21,note
 2026-11-19,WMT,in_zone,2026-11-19 09:30:00-05:00,123.29,123.96,
 2026-11-19,WMT,reclaim_rejected,2026-11-19 10:30:00-05:00,125.68,123.96,Reward to risk below the minimum
 2026-11-19,WMT,entry,2026-11-19 11:30:00-05:00,125.14,123.96,
+2026-11-19,AMZN,in_zone,2026-11-19 12:30:00-05:00,259.31,259.74,
+2026-11-19,AMZN,reclaim_rejected,2026-11-19 13:30:00-05:00,260.73,259.74,Stop too tight
