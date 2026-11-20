@@ -1,0 +1,2 @@
+ticker,source,entry_ts,entry,stop,t1,exit_ts,how,hits,pct,r
+NDAQ,screener,2026-11-19 09:29:00-05:00,105.47,103.44,111.45,2026-11-20 13:30:00-05:00,Stopped out,0,-1.92,-1.0
