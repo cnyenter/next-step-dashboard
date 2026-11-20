@@ -74,11 +74,20 @@
   }
  ],
  "day": {
-  "date": "2026-11-19",
+  "date": "2026-11-20",
   "watch": {
    "DIS": {
-    "ma21": 115.83,
-    "wk": 2.3,
+    "ma21": 116.23,
+    "wk": 1.7,
+    "label": "Above the 21MA",
+    "armed": false,
+    "zone_sent": false,
+    "entered": false,
+    "fail_note": null
+   },
+   "COST": {
+    "ma21": 1056.12,
+    "wk": 0.1,
     "label": "Above the 21MA",
     "armed": false,
     "zone_sent": false,
@@ -86,8 +95,8 @@
     "fail_note": null
    },
    "PG": {
-    "ma21": 165.05,
-    "wk": 1.6,
+    "ma21": 165.31,
+    "wk": -0.1,
     "label": "Above the 21MA",
     "armed": false,
     "zone_sent": false,
@@ -95,31 +104,31 @@
     "fail_note": null
    },
    "WMT": {
-    "ma21": 123.96,
-    "wk": 1.3,
-    "label": "Above the 21MA",
-    "armed": true,
-    "zone_sent": true,
-    "entered": true,
-    "fail_note": "Reward to risk below the minimum"
-   },
-   "COST": {
-    "ma21": 1052.35,
-    "wk": 0.8,
-    "label": "Above the 21MA",
+    "ma21": 124.15,
+    "wk": -0.1,
+    "label": "At the 21MA now",
     "armed": false,
     "zone_sent": false,
     "entered": false,
     "fail_note": null
    },
-   "AMZN": {
-    "ma21": 259.74,
-    "wk": 0.6,
+   "KO": {
+    "ma21": 95.75,
+    "wk": -1.4,
     "label": "At the 21MA now",
-    "armed": true,
-    "zone_sent": true,
+    "armed": false,
+    "zone_sent": false,
     "entered": false,
-    "fail_note": "Stop too tight"
+    "fail_note": null
+   },
+   "AAPL": {
+    "ma21": 347.77,
+    "wk": -1.6,
+    "label": "At the 21MA now",
+    "armed": false,
+    "zone_sent": false,
+    "entered": false,
+    "fail_note": null
    }
   }
  },
@@ -140,34 +149,5 @@
   "NDAQ": "2026-11-19 15:30:00-05:00",
   "WMT": "2026-11-19 15:30:00-05:00"
  },
- "pending": [
-  {
-   "t": "KO",
-   "day": "2026-11-19",
-   "px": 96.08999633789062,
-   "stop": 92.535,
-   "tg": [
-    104.76,
-    110.1,
-    115.99
-   ],
-   "lo": 93.94982039860317,
-   "hi": 96.61,
-   "sec": "Staples"
-  },
-  {
-   "t": "MCK",
-   "day": "2026-11-19",
-   "px": 1062.1600341796875,
-   "stop": 1037.6456854248047,
-   "tg": [
-    1121.5,
-    1196.09,
-    1290.96
-   ],
-   "lo": 1059.0255082920619,
-   "hi": 1065.5971236165365,
-   "sec": "Healthcare Services"
-  }
- ]
+ "pending": []
 }
