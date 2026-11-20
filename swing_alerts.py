@@ -190,7 +190,8 @@ def week_leaders(R, daily, today):
         c = settled(df, today)["Close"].dropna()
         if len(c) >= 6:
             chg[t] = (float(c.iloc[-1]) / float(c.iloc[-6]) - 1.0) * 100.0
-    return sorted(chg.items(), key=lambda kv: -kv[1])[:WATCH_TOP]
+    # a name that is down over the five sessions is not strong, only less weak: leaders must be up
+    return [kv for kv in sorted(chg.items(), key=lambda kv: -kv[1]) if kv[1] > 0][:WATCH_TOP]
 
 
 def spx_3m(spx_df):
@@ -281,6 +282,9 @@ class Run:
             return "`%-5s` %s21MA %s · %s, %+.1f%% %s%s" % (t, where, px(w["ma21"]), w["label"], w["wk"],
                                                        "over 5 days",
                                                                  "  · already in a trade" if t in held else "")
+        if not watch and (self.now.hour, self.now.minute) < (16, 0):
+            self.say("**Swing watchlist for " + self.today.strftime("%a %b %d") + "**: no name on the watchlist is up over "
+                     "the last 5 days and in an uptrend, so there is nothing to buy on a pullback today.")
         if watch and (self.now.hour, self.now.minute) < (16, 0):   # a first run after the close is too late to act on
             self.say("**Swing watchlist for " + self.today.strftime("%a %b %d") + "** (long only): an hourly close back "
                      "above the 21MA after a dip to it is the entry.\n"

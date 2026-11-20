@@ -3958,7 +3958,8 @@ elif page_selection == "Weekly Recap":
         if _c5 is not None and len(_c5) >= 6:
             _chg5[_t] = (float(_c5.iloc[-1]) / float(_c5.iloc[-6]) - 1.0) * 100.0
     _r5 = sorted(_chg5.items(), key=lambda kv: -kv[1])
-    leaders, laggards = _r5[:6], _r5[-6:][::-1]
+    # a name that is down over the five sessions is not strong, only less weak: leaders must be up
+    leaders, laggards = [kv for kv in _r5 if kv[1] > 0][:6], _r5[-6:][::-1]
     if not _chg5:
         st.info("Price history for the watchlist is not available right now.")
     else:
@@ -4069,7 +4070,10 @@ elif page_selection == "Weekly Recap":
                         unsafe_allow_html=True)
         else:
             _ok_rows = [r_ for r_ in _wl_rows(leaders, True) if _can_qualify(r_[2])]
-            if _ok_rows:
+            if not leaders:
+                st.markdown("<div class='ns-panel' style='font-size:14px;color:#cdd8e4;'>No watchlist name is up over the "
+                            "last five sessions, so there are no leaders to buy on a pullback right now.</div>", unsafe_allow_html=True)
+            elif _ok_rows:
                 st.markdown(_wl_table("Longs to watch (last five sessions' leaders)", _ok_rows, True), unsafe_allow_html=True)
             else:
                 st.markdown("<div class='ns-panel' style='font-size:14px;color:#cdd8e4;'>None of the last five sessions' leaders can set up "
