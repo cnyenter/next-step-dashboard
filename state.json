@@ -83,63 +83,8 @@
   }
  ],
  "day": {
-  "date": "2026-11-20",
-  "watch": {
-   "DIS": {
-    "ma21": 116.23,
-    "wk": 1.7,
-    "label": "Above the 21MA",
-    "armed": false,
-    "zone_sent": false,
-    "entered": false,
-    "fail_note": null
-   },
-   "COST": {
-    "ma21": 1056.12,
-    "wk": 0.1,
-    "label": "Above the 21MA",
-    "armed": false,
-    "zone_sent": false,
-    "entered": false,
-    "fail_note": null
-   },
-   "PG": {
-    "ma21": 165.31,
-    "wk": -0.1,
-    "label": "Above the 21MA",
-    "armed": false,
-    "zone_sent": false,
-    "entered": false,
-    "fail_note": null
-   },
-   "WMT": {
-    "ma21": 124.15,
-    "wk": -0.1,
-    "label": "At the 21MA now",
-    "armed": false,
-    "zone_sent": false,
-    "entered": false,
-    "fail_note": null
-   },
-   "KO": {
-    "ma21": 95.75,
-    "wk": -1.4,
-    "label": "At the 21MA now",
-    "armed": false,
-    "zone_sent": false,
-    "entered": false,
-    "fail_note": null
-   },
-   "AAPL": {
-    "ma21": 347.77,
-    "wk": -1.6,
-    "label": "At the 21MA now",
-    "armed": true,
-    "zone_sent": true,
-    "entered": false,
-    "fail_note": null
-   }
-  }
+  "date": "2026-11-23",
+  "watch": {}
  },
  "eod_done": "2026-11-20",
  "processed": {
