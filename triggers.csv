@@ -19,3 +19,4 @@ date,ticker,event,ts,price,ma21,note
 2026-11-20,KO,screener_skipped,2026-11-20 09:30:00-05:00,97.0,,above the range
 2026-11-20,MCK,screener_skipped,2026-11-20 09:30:00-05:00,1073.0,,above the range
 2026-11-20,AAPL,in_zone,2026-11-20 10:30:00-05:00,346.95,347.77,
+2026-11-24,TSLA,in_zone,2026-11-24 09:30:00-05:00,376.39,379.08,
