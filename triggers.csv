@@ -23,3 +23,4 @@ date,ticker,event,ts,price,ma21,note
 2026-11-24,TSLA,reclaim_rejected,2026-11-24 12:30:00-05:00,382.99,379.08,Reward to risk below the minimum
 2026-11-25,ZTS,screener_filled,2026-11-25 09:30:00-05:00,81.62,,
 2026-11-25,TSLA,in_zone,2026-11-25 09:30:00-05:00,357.64,379.59,
+2026-11-25,TSLA,reclaim_rejected,2026-11-25 14:30:00-05:00,382.82,379.59,Reward to risk below the minimum
