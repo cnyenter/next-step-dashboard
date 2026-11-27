@@ -105,48 +105,39 @@
   }
  ],
  "day": {
-  "date": "2026-11-25",
+  "date": "2026-11-27",
   "watch": {
-   "DIS": {
-    "ma21": 117.27,
-    "wk": 4.8,
-    "label": "Above the 21MA",
-    "armed": false,
-    "zone_sent": false,
-    "entered": false,
-    "fail_note": null
-   },
    "HD": {
-    "ma21": 338.72,
-    "wk": 4.3,
-    "label": "At the 21MA now",
+    "ma21": 340.77,
+    "wk": 7.0,
+    "label": "Extended",
     "armed": false,
     "zone_sent": false,
     "entered": false,
     "fail_note": null
    },
    "WMT": {
-    "ma21": 125.63,
-    "wk": 3.8,
+    "ma21": 126.2,
+    "wk": 3.6,
     "label": "At the 21MA now",
     "armed": false,
     "zone_sent": false,
     "entered": false,
     "fail_note": null
    },
-   "TSLA": {
-    "ma21": 379.59,
-    "wk": 1.2,
-    "label": "At the 21MA now",
-    "armed": true,
-    "zone_sent": true,
+   "DIS": {
+    "ma21": 118.02,
+    "wk": 2.6,
+    "label": "Extended",
+    "armed": false,
+    "zone_sent": false,
     "entered": false,
-    "fail_note": "Reward to risk below the minimum"
+    "fail_note": null
    },
-   "COST": {
-    "ma21": 1039.84,
-    "wk": 1.1,
-    "label": "Above the 21MA",
+   "MA": {
+    "ma21": 641.02,
+    "wk": 2.6,
+    "label": "At the 21MA now",
     "armed": false,
     "zone_sent": false,
     "entered": false,
